@@ -1,0 +1,227 @@
+{
+  "name": "openquantum-vscode",
+  "displayName": "Open Quantum",
+  "description": "OpenQASM 2 and OpenQASM 3 syntax highlighting, QASM error checking, and running quantum circuits on Open Quantum.",
+  "version": "1.0.0",
+  "icon": "media/icon.png",
+  "publisher": "quantum-rings",
+  "author": "Quantum Rings",
+  "homepage": "https://www.openquantum.com",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Quantum-Rings/openquantum-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Quantum-Rings/openquantum-vscode/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Data Science"
+  ],
+  "keywords": [
+    "qasm",
+    "openqasm",
+    "openqasm3",
+    "openqasm2",
+    "qasm3",
+    "qasm2",
+    "open qasm",
+    "quantum",
+    "qpu",
+    "quantum computing",
+    "quantum circuit",
+    "quantum programming",
+    "quantum assembly",
+    "qiskit",
+    "cirq",
+    "pennylane",
+    "braket",
+    "ibm quantum",
+    "qasm syntax",
+    "syntax highlighting"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:qasm",
+    "onLanguage:openqasm",
+    "onView:openquantum.run",
+    "onCommand:openquantum.run",
+    "onDebugResolve:openquantum"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "qasm",
+        "aliases": [
+          "OpenQASM",
+          "QASM",
+          "OpenQASM 3",
+          "OpenQASM 2",
+          "QASM3",
+          "Quantum Assembly"
+        ],
+        "extensions": [
+          ".qasm",
+          ".qasm2",
+          ".qasm3",
+          ".openqasm"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./media/icon.png",
+          "dark": "./media/icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "qasm",
+        "scopeName": "source.qasm",
+        "path": "./syntaxes/qasm.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "qasm",
+        "path": "./snippets/qasm.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "openquantum.run",
+        "title": "Run on Open Quantum",
+        "category": "Open Quantum",
+        "icon": "$(play)"
+      },
+      {
+        "command": "openquantum.jobs",
+        "title": "Jobs",
+        "category": "Open Quantum"
+      },
+      {
+        "command": "openquantum.settings",
+        "title": "Settings",
+        "category": "Open Quantum"
+      },
+      {
+        "command": "openquantum.setSdkKey",
+        "title": "Set SDK Key",
+        "category": "Open Quantum"
+      },
+      {
+        "command": "openquantum.newCircuit",
+        "title": "New Circuit",
+        "category": "Open Quantum"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "openquantum.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "editorLangId == qasm || editorLangId == openqasm"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "editorLangId == qasm || editorLangId == openqasm",
+          "command": "openquantum.run",
+          "group": "navigation"
+        }
+      ],
+      "editor/title/run": [
+        {
+          "when": "editorLangId == qasm || editorLangId == openqasm",
+          "command": "openquantum.run",
+          "group": "navigation"
+        }
+      ],
+      "MenubarDebugMenu": [
+        {
+          "command": "openquantum.run",
+          "group": "1_debug@0"
+        }
+      ],
+      "commandPalette": [
+        {
+          "when": "editorLangId == qasm || editorLangId == openqasm",
+          "command": "openquantum.run"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "openquantum",
+          "title": "Open Quantum",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "openquantum": [
+        {
+          "type": "webview",
+          "id": "openquantum.run",
+          "name": "Open Quantum",
+          "contextualTitle": "Open Quantum"
+        }
+      ]
+    },
+    "debuggers": [
+      {
+        "type": "openquantum",
+        "label": "Open Quantum",
+        "languages": [
+          "qasm",
+          "openqasm"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "QASM file to run. Defaults to the active editor.",
+                "default": "${file}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "openquantum",
+            "request": "launch",
+            "name": "Run on Open Quantum",
+            "program": "${file}"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -p ./tsconfig.json --watch",
+    "test": "tsx --test test/*.test.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "package": "npm run compile && vsce package"
+  },
+  "dependencies": {
+    "@quantum-rings/openquantum-parser": "1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.7.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

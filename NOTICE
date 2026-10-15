@@ -1,0 +1,16 @@
+openquantum-vscode
+Copyright 2026 Open Quantum / Quantum Rings
+
+This extension uses openquantum-parser
+(https://github.com/Quantum-Rings/openquantum-parser).
+
+openquantum-parser
+Copyright 2026 Open Quantum / Quantum Rings
+
+openquantum-parser includes software developed as qasm-ts
+(https://github.com/comp-phys-marc/qasm-ts),
+Copyright 2019 Marcus Edwards, with later work by Sean Kim
+and other contributors. That work is licensed under the
+Apache License 2.0. Quantum Rings' changes are a separate
+body of work under the same license. See the NOTICE file
+shipped with openquantum-parser.

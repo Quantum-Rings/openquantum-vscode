@@ -1,0 +1,17 @@
+.vscode/**
+.github/**
+images/**
+src/**
+test/**
+examples/**
+**/*.map
+**/*.ts
+tsconfig.json
+.prettierrc
+.editorconfig
+.gitignore
+.npmrc
+node_modules/**
+!node_modules/@quantum-rings/
+!node_modules/@quantum-rings/openquantum-parser/
+!node_modules/@quantum-rings/openquantum-parser/**

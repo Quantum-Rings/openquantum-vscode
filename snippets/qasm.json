@@ -1,0 +1,41 @@
+{
+  "OpenQASM 3 header": {
+    "prefix": "oq3",
+    "description": "OpenQASM 3.0 header and stdgates include",
+    "body": ["OPENQASM 3.0;", "include \"stdgates.inc\";", "$0"]
+  },
+  "OpenQASM 2 header": {
+    "prefix": "oq2",
+    "description": "OpenQASM 2.0 header and qelib1 include",
+    "body": ["OPENQASM 2.0;", "include \"qelib1.inc\";", "$0"]
+  },
+  "Bell state": {
+    "prefix": "bell",
+    "description": "Two-qubit Bell state",
+    "body": [
+      "OPENQASM 3.0;",
+      "include \"stdgates.inc\";",
+      "qubit[2] q;",
+      "bit[2] c;",
+      "h q[0];",
+      "cx q[0], q[1];",
+      "c[0] = measure q[0];",
+      "c[1] = measure q[1];"
+    ]
+  },
+  "Gate definition": {
+    "prefix": "gate",
+    "description": "OpenQASM gate definition",
+    "body": ["gate ${1:name}(${2:theta}) ${3:q} {", "\t$0", "}"]
+  },
+  "Hardware qubit": {
+    "prefix": "hwq",
+    "description": "Gate on a hardware qubit",
+    "body": ["${1:h} \\$${2:0};"]
+  },
+  "Braket pragma": {
+    "prefix": "pragma",
+    "description": "Braket verbatim pragma",
+    "body": ["#pragma braket verbatim"]
+  }
+}

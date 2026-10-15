@@ -1,0 +1,117 @@
+{
+  "scopeName": "source.qasm",
+  "name": "OpenQASM",
+  "fileTypes": ["qasm", "qasm2", "qasm3", "openqasm"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#pragma" },
+    { "include": "#version" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#hardware-qubits" },
+    { "include": "#modifiers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#gates" },
+    { "include": "#constants" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.qasm",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.qasm",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "pragma": {
+      "name": "meta.preprocessor.pragma.qasm",
+      "match": "(?i)(#\\s*pragma|\\bpragma)\\b.*$",
+      "captures": {
+        "1": { "name": "keyword.control.pragma.qasm" }
+      }
+    },
+    "version": {
+      "name": "meta.version.qasm",
+      "match": "\\b(OPENQASM)\\s+([0-9]+(?:\\.[0-9]+)?)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.version.qasm" },
+        "2": { "name": "constant.numeric.version.qasm" }
+      }
+    },
+    "strings": {
+      "name": "string.quoted.double.qasm",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.qasm",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.duration.qasm",
+          "match": "\\b\\d+(?:\\.\\d+)?(?:e[+-]?\\d+)?\\s*(?:dt|ns|us|µs|ms|s)\\b"
+        },
+        {
+          "name": "constant.numeric.bitstring.qasm",
+          "match": "\\b0[bBoOxX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.qasm",
+          "match": "\\b\\d[0-9_]*\\.\\d[0-9_]*(?:[eE][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.scientific.qasm",
+          "match": "\\b\\d+(?:[eE][+-]?\\d+)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.qasm",
+          "match": "\\b\\d[0-9_]*\\b"
+        }
+      ]
+    },
+    "hardware-qubits": {
+      "name": "variable.other.hardware-qubit.qasm",
+      "match": "\\$[0-9]+"
+    },
+    "modifiers": {
+      "name": "support.function.modifier.qasm",
+      "match": "\\b(ctrl|negctrl|inv|pow)\\s*(?=\\()"
+    },
+    "keywords": {
+      "name": "keyword.control.qasm",
+      "match": "(?i)\\b(include|if|else|for|in|while|break|continue|switch|case|default|return|end|let|const|def|defcal|defcalgrammar|cal|gate|opaque|measure|reset|barrier|delay|box|input|output|extern|readonly|mutable)\\b"
+    },
+    "types": {
+      "name": "storage.type.qasm",
+      "match": "(?i)\\b(qubit|qreg|bit|creg|int|uint|float|bool|angle|complex|duration|stretch|array)\\b"
+    },
+    "functions": {
+      "name": "support.function.math.qasm",
+      "match": "\\b(sin|cos|tan|arcsin|arccos|arctan|exp|ln|log|sqrt|ceiling|floor|popcount|rotl|rotr|mod|pow|durationof|sizeof)\\b"
+    },
+    "gates": {
+      "name": "support.function.quantum-gate.qasm",
+      "match": "\\b(id|x|y|z|h|s|sdg|t|tdg|sx|sxdg|rx|ry|rz|p|phase|u|u1|u2|u3|cx|cy|cz|ch|crx|cry|crz|cp|cu|cu1|cu3|swap|ccx|cswap|ccz|rxx|ryy|rzz|rzx|dcx|ecr|cs|csdg)\\b"
+    },
+    "constants": {
+      "name": "constant.language.qasm",
+      "match": "\\b(pi|π|tau|τ|euler|ℇ|true|false)\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.qasm",
+      "match": "->|\\*\\*=|\\+=|-=|\\*=|/=|%=|\\^=|==|!=|<=|>=|&&|\\|\\||<<|>>|\\*\\*|\\+\\+|--|[=+\\-*/%&|^~<>!@]"
+    }
+  }
+}
