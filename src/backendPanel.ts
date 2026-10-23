@@ -5,12 +5,17 @@ import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { backendDetailsHtml, type BackendDetailModel } from './backendDetails';
 
+export interface BackendDetailsHandlers {
+    onSubmitJob: (backendId: string) => void;
+    onDownloadCalibration: (backendId: string) => void;
+}
+
 /** Editor tab with the same capability sheet as the website backend page. */
 export class BackendDetailsPanel implements vscode.Disposable {
     private panel: vscode.WebviewPanel | undefined;
     private messages: vscode.Disposable | undefined;
 
-    constructor(private readonly onSubmitJob: (backendId: string) => void) {}
+    constructor(private readonly handlers: BackendDetailsHandlers) {}
 
     show(model: BackendDetailModel): void {
         const column = vscode.window.activeTextEditor
@@ -25,8 +30,13 @@ export class BackendDetailsPanel implements vscode.Disposable {
             );
             this.messages = this.panel.webview.onDidReceiveMessage(
                 (message: { command?: string; backendId?: string }) => {
-                    if (message?.command === 'submitJob' && message.backendId) {
-                        this.onSubmitJob(message.backendId);
+                    if (!message?.backendId) {
+                        return;
+                    }
+                    if (message.command === 'submitJob') {
+                        this.handlers.onSubmitJob(message.backendId);
+                    } else if (message.command === 'downloadCalibration') {
+                        this.handlers.onDownloadCalibration(message.backendId);
                     }
                 },
             );

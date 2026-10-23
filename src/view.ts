@@ -3,7 +3,8 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import {
     resolveCredentials,
@@ -23,6 +24,7 @@ import {
 } from './jobConfig';
 import {
     backendLight,
+    isOrganizationUnavailable,
     OpenQuantumClient,
     PlatformError,
     selectQuote,
@@ -39,9 +41,18 @@ import {
 } from './platform';
 import { BackendDetailsPanel } from './backendPanel';
 import { parseBackendDetails } from './backendDetails';
-import { countsFromOutput, countsToBars } from './jobExplorer';
+import { countsToBars } from './jobExplorer';
 import { JobResultPanel } from './jobPanel';
 import type { JobResultModel, ResultsKind } from './jobResult';
+import {
+    classifyResultsText,
+    COUNTS_EDITOR_MAX_CHARS,
+    emptyInputPanel,
+    inputPanelFromStored,
+    presignedObjectKey,
+    selectInputFiles,
+    type StoredJobInput,
+} from './jobFiles';
 import {
     appendJobPage,
     emptyJobList,
@@ -50,6 +61,14 @@ import {
     withPinned,
     type JobListSnapshot,
 } from './jobList';
+import {
+    appendOrgPage,
+    emptyOrgList,
+    onlyOrganization,
+    refreshOrgPage,
+    replaceOrgPage,
+    type OrgListSnapshot,
+} from './orgList';
 import {
     DEFAULT_ENDPOINTS,
     EndpointSettingsError,
@@ -94,7 +113,10 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
 
     private view: vscode.WebviewView | undefined;
     private clientCache: { key: string; client: OpenQuantumClient } | undefined;
-    private organizations: OrganizationInfo[] = [];
+    private orgList: OrgListSnapshot = emptyOrgList();
+    private orgsLoading = false;
+    private organizationsError: string | null = null;
+    private orgRequest = 0;
     private providers: ProviderInfo[] = [];
     private backends: BackendClassInfo[] = [];
     private categories: CategoryInfo[] = [];
@@ -115,8 +137,13 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
     private configLoad = 0;
     private readonly output: vscode.OutputChannel;
     private readonly runDiagnostics: vscode.DiagnosticCollection;
-    private readonly details = new BackendDetailsPanel((backendId) => {
-        void this.submitFromDetails(backendId);
+    private readonly details = new BackendDetailsPanel({
+        onSubmitJob: (backendId) => {
+            void this.submitFromDetails(backendId);
+        },
+        onDownloadCalibration: (backendId) => {
+            void this.downloadBackendCalibration(backendId);
+        },
     });
     private readonly jobResults = new JobResultPanel({
         onClose: () => {
@@ -133,6 +160,12 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         },
         onDownloadResults: (jobId) => {
             void this.downloadOpenJob(jobId);
+        },
+        onDownloadCalibration: (jobId) => {
+            void this.downloadJobCalibration(jobId);
+        },
+        onDownloadInput: (jobId, which) => {
+            void this.downloadInputFile(jobId, which);
         },
         onSaveText: (filename, content) => {
             void this.saveExplorerFile(filename, content);
@@ -154,6 +187,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
     private jobWatchBusy = false;
     private readonly loggedResults = new Set<string>();
     private readonly outputCache = new Map<string, CachedJobOutput>();
+    private readonly inputCache = new Map<string, CachedJobInput>();
     private catalogBusy = false;
     private refreshChain: Promise<void> = Promise.resolve();
     private liveQueued = false;
@@ -294,7 +328,12 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
     }
 
     async refresh(): Promise<void> {
-        const run = this.refreshChain.then(() => this.performRefresh());
+        return this.enqueue(() => this.performRefresh());
+    }
+
+    /** Run catalog and organization-list work one at a time. */
+    private enqueue(work: () => Promise<void>): Promise<void> {
+        const run = this.refreshChain.then(work);
         this.refreshChain = run.then(
             () => undefined,
             () => undefined,
@@ -308,7 +347,9 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         try {
             await this.refreshCredentials();
             if (!this.credentials) {
-                this.organizations = [];
+                this.orgList = emptyOrgList();
+                this.orgsLoading = false;
+                this.organizationsError = null;
                 this.providers = [];
                 this.backends = [];
                 this.categories = [];
@@ -323,20 +364,13 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
                 this.post();
                 return;
             }
+            this.organizationsError = null;
+            this.orgsLoading = true;
             this.status = 'Loading…';
             this.post();
             const client = await this.client();
-            const organizations = await client.listOrganizations();
-            this.organizations = organizations;
-            if (
-                organizations.length > 0 &&
-                !organizations.some((org) => org.id === this.organizationId())
-            ) {
-                await this.context.workspaceState.update(
-                    'openquantum.organizationId',
-                    organizations[0].id,
-                );
-            }
+            await this.loadOrganizationPage('refresh');
+            await this.ensureSelectedOrganization(client);
             const organizationId = this.organizationId();
             const [providers, backends, taxonomy, balance] = await Promise.all([
                 client.listProviders(organizationId),
@@ -535,8 +569,24 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             case 'openJob':
                 await this.openJob(String(message.jobId ?? ''));
                 return;
+            case 'downloadJobCalibration':
+                await this.downloadJobCalibration(String(message.jobId ?? ''));
+                return;
             case 'moreJobs':
                 await this.loadJobs('append');
+                return;
+            case 'searchOrgs': {
+                const query = String(message.query ?? '').trim();
+                await this.enqueue(async () => {
+                    if (query === this.orgList.query) {
+                        return;
+                    }
+                    await this.loadOrganizationPage('replace', query);
+                });
+                return;
+            }
+            case 'moreOrgs':
+                await this.enqueue(() => this.loadOrganizationPage('append'));
                 return;
             case 'setKey':
                 await this.setSdkKey();
@@ -544,15 +594,24 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             case 'clearKey':
                 await this.clearSdkKey();
                 return;
-            case 'selectOrg':
-                await this.context.workspaceState.update(
-                    'openquantum.organizationId',
-                    String(message.organizationId ?? ''),
-                );
+            case 'selectOrg': {
+                const organizationId = String(message.organizationId ?? '');
+                if (
+                    !organizationId ||
+                    organizationId === this.organizationId()
+                ) {
+                    return;
+                }
+                await this.rememberOrganization({
+                    id: organizationId,
+                    name: String(message.organizationName ?? ''),
+                });
                 this.balance = null;
                 this.clearQuote();
+                this.post();
                 await this.refresh();
                 return;
+            }
             case 'selectBackend':
                 await this.selectBackend(String(message.backendId ?? ''));
                 return;
@@ -848,6 +907,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             completedAt: created.completedAt,
             creditsUsed: created.creditsUsed,
             executionPlanName: created.executionPlanName,
+            hasCalibration: Boolean(created.calibrationDataUrl),
         };
         this.clearQuote();
         this.phase = 'idle';
@@ -985,18 +1045,22 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
                     (provider) => provider.id === backend.providerId,
                 )?.name || 'Provider';
             this.details.show(
-                parseBackendDetails(details, {
-                    id: backend.id,
-                    name: backend.name,
-                    shortCode: backend.shortCode,
-                    providerName,
-                    type: backend.type,
-                    status: backend.status,
-                    queueDepth: backend.queueDepth,
-                    acceptingJobs: backend.acceptingJobs,
-                    description: backend.description,
-                    sparkAvailable: backend.sparkAvailable,
-                }),
+                parseBackendDetails(
+                    details,
+                    {
+                        id: backend.id,
+                        name: backend.name,
+                        shortCode: backend.shortCode,
+                        providerName,
+                        type: backend.type,
+                        status: backend.status,
+                        queueDepth: backend.queueDepth,
+                        acceptingJobs: backend.acceptingJobs,
+                        description: backend.description,
+                        sparkAvailable: backend.sparkAvailable,
+                    },
+                    await this.calibrationDocument(client, details),
+                ),
             );
         } catch (err) {
             if (this.phase === 'working') {
@@ -1123,12 +1187,18 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             if (ticket !== this.jobWatchTicket) {
                 return;
             }
+            await this.loadJobInput(client, job);
+            if (ticket !== this.jobWatchTicket) {
+                return;
+            }
             await this.applyJobDetails(client, jobId, job);
             if (ticket !== this.jobWatchTicket) {
                 return;
             }
             this.jobResults.show(this.jobModel(jobId), false);
             const retryResults = output.resultsKind === 'error';
+            // Poll only while the job is not terminal. A failed results
+            // download keeps the watch so that retry can still succeed.
             if (isTerminalJobStatus(job.status) && !retryResults) {
                 if (this.jobWatchTimer) {
                     clearInterval(this.jobWatchTimer);
@@ -1172,30 +1242,73 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         outputDataUrl: string | null,
         calibrationDataUrl: string | null,
     ): Promise<CachedJobOutput> {
+        const objectKey = presignedObjectKey(outputDataUrl);
+        const calibrationKey = presignedObjectKey(calibrationDataUrl);
         const cached = this.outputCache.get(jobId);
         if (
             cached &&
             cached.resultsKind !== 'error' &&
-            cached.outputDataUrl === outputDataUrl &&
-            cached.calibrationDataUrl === calibrationDataUrl
+            cached.objectKey === objectKey &&
+            cached.calibrationKey === calibrationKey
         ) {
+            cached.outputDataUrl = outputDataUrl;
+            cached.calibrationDataUrl = calibrationDataUrl;
             return cached;
         }
-        let output: unknown = null;
         let downloadText: string | null = null;
         let countsMap: Record<string, number> | null = null;
-        let resultsKind: ResultsKind = outputDataUrl ? 'other' : 'none';
+        let countsLocked = false;
+        let resultsPreview: string | null = null;
+        let resultsNotice: string | null = null;
+        let resultsKind: ResultsKind = outputDataUrl ? 'text' : 'none';
+        let raw = outputDataUrl ? '' : 'No output yet.';
         if (outputDataUrl) {
             try {
-                output = await client.downloadJson(outputDataUrl);
-                downloadText = JSON.stringify(output, null, 2);
-                countsMap = countsFromOutput(output);
-                resultsKind = countsMap ? 'counts' : 'other';
+                const text = await client.downloadText(outputDataUrl);
+                downloadText = text.length <= 2_000_000 ? text : null;
+                const classified = classifyResultsText(text);
+                resultsKind = classified.kind;
+                if (classified.kind === 'counts') {
+                    countsMap = classified.counts;
+                    countsLocked =
+                        JSON.stringify(classified.counts, null, 2).length >
+                        COUNTS_EDITOR_MAX_CHARS;
+                } else if (
+                    classified.kind === 'acquisitions' ||
+                    classified.kind === 'text'
+                ) {
+                    resultsPreview = classified.text;
+                    resultsNotice = classified.truncated
+                        ? 'Showing the start of the file. Download it for the rest.'
+                        : null;
+                }
+                let parsed: unknown = null;
+                if (
+                    classified.kind !== 'binary' &&
+                    classified.kind !== 'empty'
+                ) {
+                    try {
+                        parsed = JSON.parse(text);
+                    } catch {
+                        parsed = null;
+                    }
+                }
+                raw =
+                    classified.kind === 'binary'
+                        ? 'Results file is not text.'
+                        : classified.kind === 'empty'
+                          ? 'Results file is empty.'
+                          : parsed != null
+                            ? stringifyLimited(parsed)
+                            : text.slice(0, RAW_LIMIT);
             } catch {
-                output = null;
                 downloadText = null;
                 countsMap = null;
+                countsLocked = false;
+                resultsPreview = null;
+                resultsNotice = null;
                 resultsKind = 'error';
+                raw = 'Could not read the results.';
             }
         }
         let calibration: string | null = null;
@@ -1211,14 +1324,14 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         const value: CachedJobOutput = {
             outputDataUrl,
             calibrationDataUrl,
+            objectKey,
+            calibrationKey,
             counts: countsMap ? countsToBars(countsMap) : null,
             countsMap,
-            raw:
-                output == null
-                    ? resultsKind === 'error'
-                        ? 'Could not read the results.'
-                        : 'No output yet.'
-                    : stringifyLimited(output),
+            countsLocked,
+            resultsPreview,
+            resultsNotice,
+            raw,
             calibration,
             downloadText,
             resultsKind,
@@ -1237,13 +1350,21 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         let backendClassId =
             job.backendClassId || listed?.backendClassId || null;
         if (!backendClassId && job.preparationId) {
-            try {
-                const preparation = await client.getPreparation(
-                    job.preparationId,
-                );
-                backendClassId = preparation.backendClassId;
-            } catch {
-                backendClassId = null;
+            const stored = this.inputCache.get(jobId);
+            if (
+                stored?.preparationId === job.preparationId &&
+                stored.prepLoaded
+            ) {
+                backendClassId = stored.backendClassId;
+            } else {
+                try {
+                    const preparation = await client.getPreparation(
+                        job.preparationId,
+                    );
+                    backendClassId = preparation.backendClassId;
+                } catch {
+                    backendClassId = null;
+                }
             }
         }
         const known = backendClassId
@@ -1290,6 +1411,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         if (backendClassId) {
             patch.backendClassId = backendClassId;
         }
+        patch.hasCalibration = Boolean(job.calibrationDataUrl);
         this.patchListedJob(jobId, patch);
     }
 
@@ -1308,6 +1430,8 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
     private jobModel(jobId: string): JobResultModel {
         const listed = this.visibleJobs().find((job) => job.id === jobId);
         const cached = this.outputCache.get(jobId);
+        const input = this.inputCache.get(jobId);
+        const panel = input ? inputPanelFromStored(input) : emptyInputPanel();
         return {
             id: jobId,
             name: listed?.name || 'Job',
@@ -1322,8 +1446,113 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             message: listed?.message ?? null,
             resultsKind: cached?.resultsKind ?? 'loading',
             counts: cached?.countsMap ?? null,
+            countsLocked: cached?.countsLocked ?? false,
+            resultsPreview: cached?.resultsPreview ?? null,
+            resultsNotice: cached?.resultsNotice ?? null,
             canDownload: Boolean(cached?.outputDataUrl),
+            canDownloadCalibration: Boolean(cached?.calibrationDataUrl),
+            inputTitle: panel.inputTitle,
+            inputLoading: panel.inputLoading,
+            inputTabs: panel.inputTabs,
+            inputFiles: panel.inputFiles,
+            circuit: panel.circuit,
         };
+    }
+
+    /** Load the preparation's program and diagram once per object path. */
+    private async loadJobInput(
+        client: OpenQuantumClient,
+        job: JobRecord,
+    ): Promise<void> {
+        const preparationId = job.preparationId;
+        let cached = this.inputCache.get(job.id);
+        if (
+            !cached ||
+            cached.preparationId !== preparationId ||
+            !cached.prepLoaded
+        ) {
+            const next: CachedJobInput = {
+                preparationId,
+                prepLoaded: false,
+                backendClassId: null,
+                format: 'qasm',
+                circuitRaw: null,
+                inputUrl: job.inputDataUrl,
+                processedUrl: null,
+                bodies: cached?.bodies ?? {},
+            };
+            if (preparationId) {
+                try {
+                    const prep = await client.getPreparation(preparationId);
+                    next.prepLoaded = true;
+                    next.backendClassId = prep.backendClassId;
+                    next.format = (prep.inputFormat || 'qasm').toLowerCase();
+                    next.circuitRaw = null;
+                    if (prep.circuitViewUrl) {
+                        try {
+                            next.circuitRaw = JSON.parse(
+                                await client.downloadText(prep.circuitViewUrl),
+                            );
+                        } catch {
+                            next.circuitRaw = null;
+                        }
+                    }
+                    next.inputUrl = prep.inputDataUrl ?? job.inputDataUrl;
+                    next.processedUrl = prep.processedDataUrl;
+                } catch {
+                    next.prepLoaded = true;
+                    next.inputUrl = job.inputDataUrl;
+                    next.processedUrl = null;
+                }
+            } else {
+                next.prepLoaded = true;
+            }
+            cached = next;
+            this.inputCache.set(job.id, cached);
+        }
+        const selection = selectInputFiles({
+            input_data_url: cached.inputUrl,
+            processed_data_url: cached.processedUrl,
+        });
+        const urls =
+            selection?.kind === 'tabs'
+                ? [selection.originalUrl, selection.processedUrl]
+                : selection
+                  ? [selection.url]
+                  : [];
+        for (const url of urls) {
+            const key = presignedObjectKey(url);
+            if (!key || cached.bodies[key]) {
+                continue;
+            }
+            try {
+                cached.bodies[key] = {
+                    text: await client.downloadText(url),
+                    error: null,
+                };
+            } catch {
+                cached.bodies[key] = {
+                    text: null,
+                    error: 'Could not load the input for this job.',
+                };
+            }
+        }
+    }
+
+    /** The calibration snapshot for the topology toggle, or null when it is missing. */
+    private async calibrationDocument(
+        client: OpenQuantumClient,
+        details: Record<string, unknown>,
+    ): Promise<unknown> {
+        const url = details.calibration_data_url;
+        if (typeof url !== 'string' || url.length === 0) {
+            return null;
+        }
+        try {
+            return await client.downloadJson(url);
+        } catch {
+            return null;
+        }
     }
 
     /** A catalog id the Live Capabilities panel can open, or null. */
@@ -1353,6 +1582,61 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         this.jobResults.show(this.jobModel(jobId), false);
     }
 
+    private async downloadJobCalibration(jobId: string): Promise<void> {
+        if (!jobId) {
+            return;
+        }
+        try {
+            const client = await this.client();
+            const job = await client.getJob(jobId);
+            if (!job.calibrationDataUrl) {
+                return;
+            }
+            const text = await client.downloadText(job.calibrationDataUrl);
+            const name =
+                job.name ||
+                this.visibleJobs().find((item) => item.id === jobId)?.name ||
+                'calibration';
+            await this.openEditorFile(
+                `${fileStem(name)}-calibration.json`,
+                text,
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            void vscode.window.showErrorMessage(message);
+        }
+    }
+
+    private async downloadBackendCalibration(
+        backendKey: string,
+    ): Promise<void> {
+        const backend = this.backends.find(
+            (item) => item.id === backendKey || item.shortCode === backendKey,
+        );
+        if (!backend) {
+            return;
+        }
+        try {
+            const client = await this.client();
+            const details = await client.getBackendClass(
+                backend.shortCode || backend.id,
+                this.organizationId(),
+            );
+            const url = details.calibration_data_url;
+            if (typeof url !== 'string' || url.length === 0) {
+                return;
+            }
+            const text = await client.downloadText(url);
+            await this.openEditorFile(
+                `${fileStem(backend.name)}-calibration.json`,
+                text,
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            void vscode.window.showErrorMessage(message);
+        }
+    }
+
     private async downloadOpenJob(jobId: string): Promise<void> {
         const cached = this.outputCache.get(jobId);
         if (!cached?.outputDataUrl) {
@@ -1362,11 +1646,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         if (!text) {
             try {
                 const client = await this.client();
-                text = JSON.stringify(
-                    await client.downloadJson(cached.outputDataUrl),
-                    null,
-                    2,
-                );
+                text = await client.downloadText(cached.outputDataUrl);
             } catch (err) {
                 const message =
                     err instanceof Error ? err.message : String(err);
@@ -1377,41 +1657,92 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         const name =
             this.visibleJobs().find((job) => job.id === jobId)?.name ||
             'results';
-        await this.saveTextFile(`${fileStem(name)}-results.json`, text, {
-            JSON: ['json'],
+        const json = text.trim().startsWith('{') || text.trim().startsWith('[');
+        await this.openEditorFile(
+            `${fileStem(name)}-results.${json ? 'json' : 'txt'}`,
+            text,
+        );
+    }
+
+    private async downloadInputFile(
+        jobId: string,
+        which: 'original' | 'processed',
+    ): Promise<void> {
+        const cached = this.inputCache.get(jobId);
+        if (!cached) {
+            return;
+        }
+        const selection = selectInputFiles({
+            input_data_url: cached.inputUrl,
+            processed_data_url: cached.processedUrl,
         });
+        if (!selection) {
+            return;
+        }
+        if (selection.kind === 'single' && which !== selection.id) {
+            return;
+        }
+        const url =
+            selection.kind === 'tabs'
+                ? which === 'original'
+                    ? selection.originalUrl
+                    : selection.processedUrl
+                : selection.url;
+        try {
+            const client = await this.client();
+            const text = await client.downloadText(url);
+            const name =
+                this.visibleJobs().find((job) => job.id === jobId)?.name ||
+                'input';
+            const qasm = cached.format === 'qasm';
+            const suffix =
+                selection.kind === 'tabs'
+                    ? which === 'original'
+                        ? '-original'
+                        : '-processed'
+                    : '-input';
+            await this.openEditorFile(
+                `${fileStem(name)}${suffix}.${qasm ? 'qasm' : 'json'}`,
+                text,
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            void vscode.window.showErrorMessage(message);
+        }
     }
 
     private async saveExplorerFile(
         filename: string,
         content: string,
     ): Promise<void> {
-        const filters: Record<string, string[]> = filename.endsWith('.ipynb')
-            ? { Notebook: ['ipynb'] }
-            : { JSON: ['json'] };
-        await this.saveTextFile(filename, content, filters);
+        await this.openEditorFile(filename, content);
     }
 
-    private async saveTextFile(
+    /** Open generated job output in an editor tab instead of a save dialog. */
+    private async openEditorFile(
         filename: string,
         content: string,
-        filters: Record<string, string[]>,
     ): Promise<void> {
         try {
-            const base =
-                vscode.workspace.workspaceFolders?.[0]?.uri ??
-                vscode.Uri.file(homedir());
-            const uri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.joinPath(base, filename),
-                filters,
-            });
-            if (!uri) {
-                return;
-            }
+            const folder = vscode.Uri.file(
+                join(tmpdir(), 'openquantum-vscode'),
+            );
+            await vscode.workspace.fs.createDirectory(folder);
+            const uri = vscode.Uri.joinPath(folder, editorFileName(filename));
             await vscode.workspace.fs.writeFile(
                 uri,
                 new TextEncoder().encode(content),
             );
+            if (uri.path.endsWith('.ipynb')) {
+                const notebook =
+                    await vscode.workspace.openNotebookDocument(uri);
+                await vscode.window.showNotebookDocument(notebook, {
+                    preview: false,
+                });
+                return;
+            }
+            const document = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(document, { preview: false });
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             void vscode.window.showErrorMessage(message);
@@ -1425,6 +1756,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         this.jobsError = null;
         this.selectedJobId = null;
         this.outputCache.clear();
+        this.inputCache.clear();
         this.stopJobWatch();
         this.jobResults.dispose();
     }
@@ -1530,10 +1862,162 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
         const stored = this.context.workspaceState.get<string>(
             'openquantum.organizationId',
         );
-        if (stored && this.organizations.some((org) => org.id === stored)) {
-            return stored;
+        return stored || null;
+    }
+
+    /** Name for the header. The id stays selected even when it is not on this page. */
+    private organizationLabel(): string | null {
+        const id = this.organizationId();
+        if (!id) {
+            return null;
         }
-        return this.organizations[0]?.id ?? null;
+        const listed = this.orgList.organizations.find((org) => org.id === id);
+        if (listed) {
+            return listed.name;
+        }
+        return (
+            this.context.workspaceState.get<string>(
+                'openquantum.organizationName',
+            ) || null
+        );
+    }
+
+    private async rememberOrganization(
+        org: OrganizationInfo | null,
+    ): Promise<void> {
+        const id = org?.id ?? '';
+        const name = org?.name ?? '';
+        const storedId =
+            this.context.workspaceState.get<string>(
+                'openquantum.organizationId',
+            ) ?? '';
+        const storedName =
+            this.context.workspaceState.get<string>(
+                'openquantum.organizationName',
+            ) ?? '';
+        if (storedId === id && storedName === name) {
+            return;
+        }
+        await this.context.workspaceState.update(
+            'openquantum.organizationId',
+            id || undefined,
+        );
+        await this.context.workspaceState.update(
+            'openquantum.organizationName',
+            name || undefined,
+        );
+    }
+
+    /**
+     * Keep the saved organization when this page does not include it.
+     * Switch only when the organization itself is gone.
+     */
+    private async ensureSelectedOrganization(
+        client: OpenQuantumClient,
+    ): Promise<void> {
+        const stored = this.organizationId();
+        if (stored) {
+            const listed = this.orgList.organizations.find(
+                (org) => org.id === stored,
+            );
+            if (listed) {
+                await this.rememberOrganization(listed);
+                return;
+            }
+            try {
+                await this.rememberOrganization(
+                    await client.getOrganization(stored),
+                );
+                return;
+            } catch (error) {
+                if (!isOrganizationUnavailable(error)) {
+                    throw error;
+                }
+            }
+        }
+        await this.rememberOrganization(
+            await this.firstListedOrganization(client),
+        );
+    }
+
+    /** First organization from an unfiltered page, without replacing a search. */
+    private async firstListedOrganization(
+        client: OpenQuantumClient,
+    ): Promise<OrganizationInfo | null> {
+        if (!this.orgList.query) {
+            return this.orgList.organizations[0] ?? null;
+        }
+        const page = await client.listOrganizations();
+        return page.organizations[0] ?? null;
+    }
+
+    private async loadOrganizationPage(
+        mode: 'refresh' | 'replace' | 'append',
+        query?: string,
+    ): Promise<void> {
+        const nextQuery = (
+            mode === 'append'
+                ? this.orgList.query
+                : (query ?? this.orgList.query)
+        ).trim();
+        if (mode === 'append' && !this.orgList.cursor) {
+            return;
+        }
+        const ticket = ++this.orgRequest;
+        const cursor =
+            mode === 'append' ? (this.orgList.cursor ?? undefined) : undefined;
+        // A catalog refresh already posted Loading…. Search and Load more post themselves.
+        const quiet = mode === 'refresh';
+        this.orgsLoading = true;
+        this.organizationsError = null;
+        if (!quiet) {
+            this.post();
+        }
+        try {
+            const client = await this.client();
+            const page = await client.listOrganizations({
+                cursor,
+                name: nextQuery || undefined,
+            });
+            if (ticket !== this.orgRequest) {
+                return;
+            }
+            this.orgList =
+                mode === 'append'
+                    ? appendOrgPage(
+                          this.orgList,
+                          page.organizations,
+                          page.nextCursor,
+                      )
+                    : mode === 'refresh'
+                      ? refreshOrgPage(
+                            this.orgList,
+                            page.organizations,
+                            page.nextCursor,
+                            nextQuery,
+                        )
+                      : replaceOrgPage(
+                            page.organizations,
+                            page.nextCursor,
+                            nextQuery,
+                        );
+        } catch (error) {
+            if (ticket !== this.orgRequest) {
+                return;
+            }
+            if (mode === 'refresh') {
+                throw error;
+            }
+            this.organizationsError =
+                error instanceof Error ? error.message : String(error);
+        } finally {
+            if (ticket === this.orgRequest) {
+                this.orgsLoading = false;
+                if (!quiet) {
+                    this.post();
+                }
+            }
+        }
     }
 
     private requireOrganization(): string {
@@ -1875,11 +2359,22 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
             : undefined;
         const state: PanelState = {
             signedIn: this.credentials != null,
-            organizations: this.organizations.map((org) => ({
+            organizations: this.orgList.organizations.map((org) => ({
                 id: org.id,
                 name: org.name,
             })),
             organizationId: this.organizationId(),
+            organizationName: this.organizationLabel(),
+            organizationsCursor: this.orgList.cursor,
+            organizationsLoading: this.orgsLoading,
+            organizationQuery: this.orgList.query,
+            organizationsError: this.organizationsError,
+            singleOrganization:
+                onlyOrganization(
+                    this.orgList,
+                    this.organizationId(),
+                    this.organizationLabel(),
+                ) != null,
             balance: this.balance,
             backends: this.backends.map((backend) => ({
                 id: backend.id,
@@ -1961,6 +2456,7 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
                 providerName: job.providerName,
                 submittedAt: job.submittedAt,
                 creditsUsed: job.creditsUsed,
+                hasCalibration: job.hasCalibration,
             })),
             jobsCursor: this.jobList.cursor,
             jobsLoading: this.jobsLoading,
@@ -1974,12 +2470,28 @@ export class OpenQuantumViewProvider implements vscode.WebviewViewProvider {
 interface CachedJobOutput {
     outputDataUrl: string | null;
     calibrationDataUrl: string | null;
+    objectKey: string;
+    calibrationKey: string;
     counts: CountBar[] | null;
     countsMap: Record<string, number> | null;
+    countsLocked: boolean;
+    resultsPreview: string | null;
+    resultsNotice: string | null;
     raw: string;
     calibration: string | null;
     downloadText: string | null;
     resultsKind: ResultsKind;
+}
+
+interface CachedJobInput extends StoredJobInput {
+    preparationId: string | null;
+    backendClassId: string | null;
+}
+
+function editorFileName(filename: string): string {
+    const base = filename.split(/[/\\]/).pop() ?? '';
+    const safe = base.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
+    return safe || 'openquantum.txt';
 }
 
 function fileStem(name: string): string {

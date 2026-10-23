@@ -26,6 +26,7 @@ function job(id: string, status = 'Queued'): JobSummary {
         completedAt: null,
         creditsUsed: null,
         executionPlanName: null,
+        hasCalibration: false,
     };
 }
 
@@ -80,7 +81,10 @@ test('a submitted job stays visible until the server list includes it', () => {
 
 test('terminal job statuses stop the result watch', () => {
     assert.equal(isTerminalJobStatus('Completed'), true);
+    assert.equal(isTerminalJobStatus('Failed'), true);
     assert.equal(isTerminalJobStatus('cancelled'), true);
+    assert.equal(isTerminalJobStatus('Created'), false);
+    assert.equal(isTerminalJobStatus('Pending'), false);
     assert.equal(isTerminalJobStatus('Queued'), false);
     assert.equal(isTerminalJobStatus('Running'), false);
 });

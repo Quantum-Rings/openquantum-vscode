@@ -59,6 +59,7 @@ export interface ViewJob {
     providerName: string;
     submittedAt: string | null;
     creditsUsed: number | null;
+    hasCalibration: boolean;
 }
 
 export type PanelPage = 'home' | 'create' | 'jobs' | 'keys' | 'settings';
@@ -67,6 +68,14 @@ export interface PanelState {
     signedIn: boolean;
     organizations: { id: string; name: string }[];
     organizationId: string | null;
+    /** Saved organization, including when it is not on the loaded page. */
+    organizationName: string | null;
+    organizationsCursor: string | null;
+    organizationsLoading: boolean;
+    organizationQuery: string;
+    organizationsError: string | null;
+    /** One organization and no further page. Settings shows the name only. */
+    singleOrganization: boolean;
     balance: { sparkCredits: number; fullCredits: number } | null;
     backends: ViewBackend[];
     backendId: string | null;
@@ -161,6 +170,10 @@ export function webviewHtml(
   .add { align-self: center; white-space: nowrap; }
   .org-line { margin: 6px 0 0; }
   .org-line button { background: transparent; color: var(--vscode-textLink-foreground); padding: 0; }
+  .org-list { max-height: 240px; overflow: auto; margin: 4px 0 8px; border: 1px solid var(--vscode-widget-border, transparent); border-radius: 4px; }
+  button.org { display: block; width: 100%; text-align: left; margin: 0; padding: 6px 8px; border: none; border-radius: 0; background: transparent; color: inherit; border-bottom: 1px solid var(--vscode-widget-border, transparent); }
+  button.org:last-child { border-bottom: none; }
+  button.org.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .nav { display: flex; flex-wrap: wrap; justify-content: flex-start; align-content: flex-start; gap: 4px; margin: 12px 0 14px; }
   .nav button { border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
   .nav button.active { background: #50bc83; color: #ffffff; }
@@ -211,8 +224,17 @@ export function webviewHtml(
   .card-actions .primary { width: 100%; }
   button.specs { background: transparent; color: #50bc83; padding: 2px 0; }
   button.specs:hover { color: #45a872; text-decoration: underline; }
-  button.job { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 8px; border-radius: 8px; border: 1px solid var(--vscode-widget-border, transparent); background: var(--vscode-editor-background); }
-  button.job.selected { border-color: #50bc83; }
+  .job { position: relative; margin: 0 0 8px; border-radius: 8px; border: 1px solid var(--vscode-widget-border, transparent); background: var(--vscode-editor-background); }
+  .job.selected { border-color: #50bc83; }
+  button.job-open { display: block; width: 100%; text-align: left; margin: 0; padding: 8px; border: none; border-radius: 8px; background: transparent; color: inherit; }
+  .job.has-more button.job-open { padding-right: 36px; }
+  button.job-more { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); }
+  button.job-more:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.25)); color: var(--vscode-foreground); }
+  .job-menu { position: absolute; z-index: 6; top: 32px; right: 6px; min-width: 230px; padding: 4px; border-radius: 8px; background: var(--vscode-dropdown-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-contrastBorder, transparent)); box-shadow: 0 4px 16px rgba(0,0,0,.28); }
+  button.job-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; background: transparent; color: inherit; white-space: nowrap; }
+  button.job-menu-item:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.18)); }
+  .beta { display: inline-flex; align-items: center; border-radius: 999px; background: rgba(245, 158, 11, 0.15); color: #d97706; font-size: 10px; font-weight: 650; line-height: 1.4; padding: 1px 6px; }
+  body.vscode-dark .beta { color: #fbbf24; }
   .row { display: flex; justify-content: space-between; gap: 8px; }
   .status.ok { color: #3fb950; }
   .status.bad { color: var(--vscode-errorForeground); }
@@ -245,7 +267,10 @@ export function webviewHtml(
     const main = document.getElementById('main');
     let pickerOpen = false;
     let openTip = null;
+    let openJobMenu = null;
     let latest = null;
+    let orgQueryDraft = '';
+    let orgSearchTimer = 0;
 
     const post = (command, extra) => vscode.postMessage(Object.assign({ command }, extra || {}));
 
@@ -269,13 +294,18 @@ export function webviewHtml(
         pickerOpen = false;
         changed = true;
       }
+      if (openJobMenu && !target.closest('.job')) {
+        openJobMenu = null;
+        changed = true;
+      }
       if (changed && latest) render(latest);
     });
 
     document.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape' || (!pickerOpen && !openTip)) return;
+      if (event.key !== 'Escape' || (!pickerOpen && !openTip && !openJobMenu)) return;
       pickerOpen = false;
       openTip = null;
+      openJobMenu = null;
       if (latest) render(latest);
     });
 
@@ -393,12 +423,33 @@ export function webviewHtml(
       for (const control of controls) control.disabled = true;
     }
 
+    function orgListKey(state) {
+      return [
+        state.organizationId || '',
+        state.organizationName || '',
+        state.organizationQuery || '',
+        state.organizationsCursor || '',
+        state.organizationsLoading ? '1' : '0',
+        state.organizationsError || '',
+        state.organizations.map((item) => item.id + '\\t' + item.name).join('\\n'),
+      ].join('\\u0001');
+    }
+
+    function submitOrgSearch() {
+      clearTimeout(orgSearchTimer);
+      const query = orgQueryDraft.trim();
+      if (latest && query === (latest.organizationQuery || '')) return;
+      post('searchOrgs', { query });
+    }
+
     function render(state) {
       const scroller = document.scrollingElement;
       const scroll = scroller ? scroller.scrollTop : 0;
       const active = document.activeElement;
+      const orgSearch = active && active.id === 'org-search' ? { start: active.selectionStart, end: active.selectionEnd } : null;
+      if (!orgSearch) orgQueryDraft = state.organizationQuery || '';
       const typing = !!(active && active.closest && active.closest('#main') && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
-      const keep = typing && latest && state.page === latest.page && state.step === latest.step && state.phase === latest.phase && state.backendId === latest.backendId && state.configReady === latest.configReady && state.configErrors.join('\\n') === latest.configErrors.join('\\n');
+      const keep = typing && latest && state.page === latest.page && state.step === latest.step && state.phase === latest.phase && state.backendId === latest.backendId && state.configReady === latest.configReady && state.configErrors.join('\\n') === latest.configErrors.join('\\n') && orgListKey(state) === orgListKey(latest);
       latest = state;
       renderBalance(state);
       renderNav(state);
@@ -413,6 +464,13 @@ export function webviewHtml(
         else if (state.page === 'settings') renderSettings(state);
         else if (state.step === 'quote') renderQuote(state);
         else renderSetup(state);
+        if (orgSearch) {
+          const input = document.getElementById('org-search');
+          if (input) {
+            input.focus();
+            if (orgSearch.start != null && orgSearch.end != null) input.setSelectionRange(orgSearch.start, orgSearch.end);
+          }
+        }
       }
       if (scroller) scroller.scrollTop = scroll;
     }
@@ -435,13 +493,12 @@ export function webviewHtml(
       add.className = 'primary add';
       row.append(stats, add);
       balance.appendChild(row);
-      const org = state.organizations.find((item) => item.id === state.organizationId);
-      if (org) {
+      if (state.organizationName) {
         const line = document.createElement('p');
         line.className = 'org-line';
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = org.name;
+        button.textContent = state.organizationName;
         button.addEventListener('click', () => post('navigate', { page: 'settings' }));
         line.appendChild(button);
         balance.appendChild(line);
@@ -647,9 +704,11 @@ export function webviewHtml(
         main.appendChild(paragraph('No jobs for this organization.', 'muted'));
       }
       for (const job of state.jobs) {
-        const card = document.createElement('button');
-        card.type = 'button';
-        card.className = 'job' + (job.id === state.selectedJobId ? ' selected' : '');
+        const card = document.createElement('div');
+        card.className = 'job' + (job.id === state.selectedJobId ? ' selected' : '') + (job.hasCalibration ? ' has-more' : '');
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'job-open';
         const top = document.createElement('div');
         top.className = 'row';
         const name = document.createElement('span');
@@ -665,8 +724,44 @@ export function webviewHtml(
         const when = formatWhen(job.submittedAt);
         const credits = job.creditsUsed == null ? '' : creditLabel(job.creditsUsed);
         meta.textContent = [where, when, credits].filter(Boolean).join(' · ');
-        card.append(top, meta);
-        card.addEventListener('click', () => post('openJob', { jobId: job.id }));
+        open.append(top, meta);
+        open.addEventListener('click', () => post('openJob', { jobId: job.id }));
+        card.appendChild(open);
+        if (job.hasCalibration) {
+          const more = document.createElement('button');
+          more.type = 'button';
+          more.className = 'job-more';
+          more.title = 'More actions';
+          more.setAttribute('aria-label', 'More actions');
+          more.textContent = '…';
+          more.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openJobMenu = openJobMenu === job.id ? null : job.id;
+            if (latest) render(latest);
+          });
+          card.appendChild(more);
+          if (openJobMenu === job.id) {
+            const menu = document.createElement('div');
+            menu.className = 'job-menu';
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'job-menu-item';
+            const label = document.createElement('span');
+            label.textContent = 'Open calibration';
+            const beta = document.createElement('span');
+            beta.className = 'beta';
+            beta.textContent = 'Beta';
+            item.append(label, beta);
+            item.addEventListener('click', (event) => {
+              event.stopPropagation();
+              openJobMenu = null;
+              post('downloadJobCalibration', { jobId: job.id });
+              if (latest) render(latest);
+            });
+            menu.appendChild(item);
+            card.appendChild(menu);
+          }
+        }
         main.appendChild(card);
       }
       if (state.jobsCursor) {
@@ -692,6 +787,19 @@ export function webviewHtml(
       main.appendChild(line);
     }
 
+    function orgButton(name, id, selected) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = selected ? 'org selected' : 'org';
+      button.textContent = name || id;
+      if (selected) button.setAttribute('aria-current', 'true');
+      button.addEventListener('click', () => {
+        if (selected) return;
+        post('selectOrg', { organizationId: id, organizationName: name || '' });
+      });
+      return button;
+    }
+
     function renderSettings(state) {
       main.appendChild(heading('Settings'));
       main.appendChild(paragraph('Jobs, credits, and private backends follow the selected organization.', 'muted'));
@@ -699,18 +807,61 @@ export function webviewHtml(
         signedOut('Save an SDK key to choose an organization.');
         return;
       }
-      if (state.organizations.length === 0) {
-        main.appendChild(paragraph('No organization was found for this SDK key.', 'muted'));
+      if (state.singleOrganization) {
+        const label = state.organizationName || (state.organizations[0] && state.organizations[0].name) || '';
+        if (label) {
+          const name = paragraph(label);
+          name.className = 'account-name';
+          main.appendChild(name);
+        }
         return;
       }
-      if (state.organizations.length === 1) {
-        const name = paragraph(state.organizations[0].name);
-        name.className = 'account-name';
-        main.appendChild(name);
+      if (!state.organizationQuery && state.organizations.length === 0 && !state.organizationId) {
+        main.appendChild(paragraph(state.organizationsLoading ? 'Loading organizations…' : 'No organization was found for this SDK key.', 'muted'));
         return;
       }
       const fields = document.createElement('div');
-      fields.append.apply(fields, labeledSelect('Organization', state.organizations.map((item) => ({ value: item.id, label: item.name })), state.organizationId, (value) => post('selectOrg', { organizationId: value })));
+      const label = document.createElement('label');
+      label.htmlFor = 'org-search';
+      label.textContent = 'Organization';
+      const input = document.createElement('input');
+      input.id = 'org-search';
+      input.type = 'text';
+      input.placeholder = 'Search organizations';
+      input.autocomplete = 'off';
+      input.value = orgQueryDraft;
+      input.addEventListener('input', () => {
+        orgQueryDraft = input.value;
+        clearTimeout(orgSearchTimer);
+        orgSearchTimer = setTimeout(submitOrgSearch, 300);
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        submitOrgSearch();
+      });
+      fields.append(label, input);
+      if (state.organizationsError) {
+        const err = paragraph(state.organizationsError);
+        err.className = 'error';
+        fields.appendChild(err);
+      }
+      const selectedMissing = state.organizationId && !state.organizations.some((item) => item.id === state.organizationId);
+      const list = document.createElement('div');
+      list.className = 'org-list';
+      if (selectedMissing) list.appendChild(orgButton(state.organizationName || state.organizationId, state.organizationId, true));
+      for (const item of state.organizations) list.appendChild(orgButton(item.name, item.id, item.id === state.organizationId));
+      if (list.childNodes.length) fields.appendChild(list);
+      if (state.organizationsLoading && state.organizations.length === 0) {
+        fields.appendChild(paragraph('Loading organizations…', 'muted'));
+      } else if (state.organizationQuery && state.organizations.length === 0) {
+        fields.appendChild(paragraph('No organizations match "' + state.organizationQuery + '".', 'muted'));
+      }
+      if (state.organizationsCursor) {
+        const more = commandButton(state.organizationsLoading ? 'Loading…' : 'Load more…', 'moreOrgs', false);
+        more.disabled = !!state.organizationsLoading;
+        fields.appendChild(buttonRow([more]));
+      }
       if (state.phase === 'working') lockControls(fields);
       main.appendChild(fields);
     }

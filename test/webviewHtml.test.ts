@@ -37,7 +37,15 @@ test('the sidebar script parses and points at the website pages', () => {
     assert.match(html, /\['home', 'Backends'\]/);
     assert.match(html, /pageHead\('Backends', 'refresh'\)/);
     assert.match(html, /pageHead\('Jobs', 'refreshJobs'\)/);
+    assert.match(html, /Open calibration/);
+    assert.match(html, /downloadJobCalibration/);
+    assert.match(html, /aria-label', 'More actions'/);
     assert.match(html, /Load more…/);
+    assert.match(html, /Search organizations/);
+    assert.match(html, /searchOrgs/);
+    assert.match(html, /state\.singleOrganization/);
+    assert.match(html, /moreOrgs/);
+    assert.doesNotMatch(html, /labeledSelect\('Organization'/);
     assert.match(html, /function trackedJobStatus/);
     assert.doesNotMatch(html, /This job keeps running/);
     assert.doesNotMatch(html, /heading\('Result'\)/);

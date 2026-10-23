@@ -5,10 +5,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
     applyBitOrder,
+    axisTicks,
     buildRows,
+    chartLabels,
     countsFromOutput,
     defaultControls,
     explorerStats,
+    formatTick,
+    middleEllipsis,
     notebookJson,
     parseCounts,
     reverseCounts,
@@ -88,6 +92,17 @@ test('stats use the full counts, including a fair bit of entropy 1', () => {
     assert.ok(Math.abs((skewed?.entropy ?? 0) - 0.9182958340544896) < 1e-9);
 });
 
+test('a long most-likely state keeps both ends inside 32 characters', () => {
+    const fitted = '1'.repeat(32);
+    assert.equal(middleEllipsis(fitted, 32), fitted);
+    const state = `${'0'.repeat(20)}${'1'.repeat(20)}`;
+    const shown = middleEllipsis(state, 32);
+    assert.equal(shown.length, 32);
+    assert.equal(shown.startsWith('0'.repeat(16)), true);
+    assert.equal(shown.endsWith('1'.repeat(15)), true);
+    assert.equal(shown.includes('…'), true);
+});
+
 test('bit order is applied before rows, not inside them', () => {
     const ordered = applyBitOrder({ '01': 5, '10': 1 }, 'reversed');
     const rows = buildRows(ordered, defaultControls());
@@ -131,4 +146,45 @@ test('the notebook loads the adjusted counts', () => {
     assert.match(source, /"00": 4/);
     assert.match(source, /plot_histogram/);
     assert.match(source, /matplotlib/);
+});
+
+test('a count of 3 gets the ticks 0, 1, 2, and 3 once each', () => {
+    const scale = axisTicks(3, true);
+    assert.equal(scale.axisMax, 3);
+    assert.deepEqual(scale.ticks, [0, 1, 2, 3]);
+    assert.deepEqual(
+        scale.ticks.map((tick) => formatTick(tick, true)),
+        ['0', '1', '2', '3'],
+    );
+});
+
+test('count ticks stay unique from 1 up through a few thousand', () => {
+    for (const max of [1, 2, 3, 5, 7, 10, 64, 100, 999, 1024, 5000]) {
+        const scale = axisTicks(max, true);
+        const labels = scale.ticks.map((tick) => formatTick(tick, true));
+        assert.equal(new Set(labels).size, labels.length, String(max));
+        assert.equal(labels[0], '0');
+        assert.ok(scale.axisMax + 1e-9 >= max);
+        assert.equal(scale.ticks[scale.ticks.length - 1], scale.axisMax);
+    }
+    assert.equal(formatTick(1000, true), '1,000');
+    assert.equal(formatTick(0.1, false), '0.1');
+    assert.equal(formatTick(0.25, false), '0.25');
+});
+
+test('long bitstrings skip bars so diagonal labels do not stack', () => {
+    const crowded = chartLabels(640, 64, 20);
+    assert.ok(crowded.stride > 1);
+    assert.ok(crowded.limit >= 8);
+    assert.ok(crowded.limit <= 24);
+    const footprint = crowded.limit * 6.8 * 0.5;
+    assert.ok(footprint <= crowded.stride * (640 / 64) + 1);
+
+    const roomy = chartLabels(640, 4, 2);
+    assert.equal(roomy.stride, 1);
+    assert.equal(roomy.limit, 2);
+
+    const wideStates = chartLabels(900, 8, 40);
+    assert.equal(wideStates.stride, 1);
+    assert.equal(wideStates.limit, 24);
 });

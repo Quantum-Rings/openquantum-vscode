@@ -2,7 +2,7 @@
   "name": "openquantum-vscode",
   "displayName": "Open Quantum",
   "description": "OpenQASM 2 and OpenQASM 3 syntax highlighting, QASM error checking, and running quantum circuits on Open Quantum.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "media/icon.png",
   "publisher": "quantum-rings",
   "author": "Quantum Rings",
@@ -214,7 +214,7 @@
     "package": "npm run compile && vsce package"
   },
   "dependencies": {
-    "@quantum-rings/openquantum-parser": "1.0.0"
+    "@quantum-rings/openquantum-parser": "1.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.12.4",

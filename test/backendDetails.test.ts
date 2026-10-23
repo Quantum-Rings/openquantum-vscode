@@ -8,6 +8,7 @@ import {
     parseBackendDetails,
     type BackendCatalogFacts,
 } from '../src/backendDetails';
+import { formatCalibrationStamp } from '../src/calibrationSummary';
 import { isDenseCouplingMap, layoutCoupling } from '../src/couplingMap';
 
 const catalog: BackendCatalogFacts = {
@@ -23,7 +24,7 @@ const catalog: BackendCatalogFacts = {
     sparkAvailable: true,
 };
 
-test('details prefer the operable map and keep disabled qubits on the chip', () => {
+test('details draw coupling_map and ignore leftover operable maps', () => {
     const model = parseBackendDetails(
         {
             name: 'Forte 1',
@@ -32,7 +33,18 @@ test('details prefer the operable map and keep disabled qubits on the chip', () 
                 n_qubits: 4,
                 native_ops: [{ name: 'rx', arity: 1, params: ['theta'] }],
                 supported_ops: [{ name: 'cx', arity: 2 }],
-                features: ['mid_circuit_measure', 'custom_flag'],
+                features: [
+                    'mid_circuit_measure',
+                    'explicit_measure',
+                    'multiple_registers',
+                    'physical_virtual_mix',
+                    'relaxed_virtual_qubits',
+                    'bare_qubit_indexing',
+                    'duration_boxes',
+                    'register_concat',
+                    'mixed_measurement_result_pragmas',
+                    'custom_flag',
+                ],
                 limits: { max_shots: 1000 },
                 topology: {
                     directed_edges: false,
@@ -56,20 +68,43 @@ test('details prefer the operable map and keep disabled qubits on the chip', () 
     assert.deepEqual(model.nativeOps, ['rx(theta) [1q]']);
     assert.deepEqual(model.supportedOps, ['cx [2q]']);
     assert.equal(model.features[0].label, 'Mid-Circuit Measurement');
-    assert.equal(model.features[1].label, 'custom flag');
+    assert.equal(model.features[1].label, 'Explicit Measurement');
+    assert.match(model.features[1].description, /must include a measure/);
+    assert.deepEqual(
+        model.features.slice(2, 9).map((feature) => feature.label),
+        [
+            'Multiple Registers',
+            'Physical and Virtual Mix',
+            'Relaxed Virtual Qubits',
+            'Bare Qubit Indexing',
+            'Duration Boxes',
+            'Register Concatenation',
+            'Mixed Measurement and Result Pragmas',
+        ],
+    );
+    assert.equal(model.features[9].label, 'custom flag');
+    assert.equal(model.features[9].description, 'Backend capability flag.');
     assert.deepEqual(model.limits, [{ label: 'Max Shots', value: '1000' }]);
     assert.ok(model.coupling);
-    assert.equal(model.coupling.edges.length, 1);
-    assert.equal(model.coupling.nodes.length, 4);
-    assert.equal(
-        model.coupling.nodes.find((node) => node.id === 2)?.enabled,
-        false,
+    assert.deepEqual(model.coupling.edges, [
+        [0, 1],
+        [1, 2],
+    ]);
+    assert.deepEqual(
+        model.coupling.nodes.map((node) => node.id),
+        [0, 1, 2],
     );
     assert.equal(
-        model.coupling.nodes.find((node) => node.id === 0)?.enabled,
+        model.coupling.nodes.every((node) => node.enabled),
         true,
     );
-    assert.match(model.couplingNote ?? '', /Operable connectivity/);
+    assert.equal(model.coupling.showEnabled, false);
+    assert.equal(model.calibrationAvailable, false);
+    assert.doesNotMatch(model.couplingNote ?? '', /Operable/);
+    assert.match(
+        model.couplingNote ?? '',
+        /3 qubits and 2 edges\. Connectivity is dense/,
+    );
 });
 
 test('details html escapes backend names and includes the capability sections', () => {
@@ -94,6 +129,7 @@ test('details html escapes backend names and includes the capability sections', 
     assert.match(html, /Supported Ops \(total\)/);
     assert.match(html, /Advertised Features/);
     assert.match(html, /Qubit Topology/);
+    assert.doesNotMatch(html, /class="toggle/);
     assert.match(html, /Native operations/);
     assert.match(html, /Device features/);
     assert.match(html, /Hover or tap a qubit to highlight its neighbors/);
@@ -104,6 +140,125 @@ test('details html escapes backend names and includes the capability sections', 
     assert.match(html, /<svg/);
     assert.match(html, /Spark is available/);
     assert.match(html, /M11\.017 2\.814/);
+    assert.match(html, /No calibration published for this backend/);
+    assert.match(
+        html,
+        /<h2 class="with-beta">Calibration <span class="beta">Beta<\/span><\/h2>/,
+    );
+    assert.doesNotMatch(html, /Open calibration/);
+});
+
+test('details offer a beta calibration download when a snapshot exists', () => {
+    const model = parseBackendDetails(
+        {
+            constraint_data: { n_qubits: 2 },
+            calibration_data_url: 'https://example.test/calibration.json',
+        },
+        catalog,
+    );
+    assert.equal(model.calibrationAvailable, true);
+    const html = backendDetailsHtml('nonce', model);
+    assert.match(html, /Open calibration/);
+    assert.match(
+        html,
+        /<h2 class="with-beta">Calibration <span class="beta">Beta<\/span><\/h2>/,
+    );
+    assert.doesNotMatch(html, /Open calibration<span class="beta">/);
+    assert.match(html, /command: 'downloadCalibration'/);
+    assert.doesNotMatch(html, /example\.test/);
+    assert.match(html, />Updated</);
+    assert.match(html, /—/);
+});
+
+test('calibration card shows fidelity, T1, and T2 from the snapshot', () => {
+    const updated = '2026-03-01T15:04:00.000Z';
+    const model = parseBackendDetails(
+        {
+            constraint_data: { n_qubits: 2 },
+            calibration_data_url: 'https://example.test/calibration.json',
+            calibration_updated_at: updated,
+        },
+        catalog,
+        {
+            qcal: { name: 'qcal.device_calibration' },
+            aggregates: {
+                qubits: {
+                    t1: { value: 20e-6, unit: 's' },
+                    t2: { value: 15e-6, unit: 's' },
+                },
+                gates_1q: { fidelity: { value: 0.999, unit: 'dimensionless' } },
+                gates_2q: { fidelity: { value: 0.991, unit: 'dimensionless' } },
+            },
+        },
+    );
+    assert.equal(model.calibration?.fidelity1q?.text, '99.90%');
+    assert.equal(model.calibration?.fidelity2q?.text, '99.10%');
+    assert.equal(model.calibration?.t1?.text, '20.0 µs');
+    assert.equal(model.calibration?.t2?.text, '15.0 µs');
+    assert.equal(model.calibrationUpdated, formatCalibrationStamp(updated));
+    const html = backendDetailsHtml('nonce', model);
+    assert.match(html, /1Q fidelity/);
+    assert.match(html, /2Q fidelity/);
+    assert.match(html, />T1</);
+    assert.match(html, />T2</);
+    assert.match(html, /99\.90%/);
+    assert.match(html, /99\.10%/);
+    assert.match(html, /20\.0 µs/);
+    assert.match(html, /15\.0 µs/);
+    assert.match(html, /Published device value/);
+    assert.match(html, /button id="download-calibration" class="calibration"/);
+    assert.match(html, /appearance: none/);
+    assert.match(
+        html,
+        /button\.toggle\.on, body\.vscode-dark button\.toggle\.on/,
+    );
+    assert.match(html, /height: 420px/);
+});
+
+test('live and physical toggles count qubits', () => {
+    const model = parseBackendDetails(
+        {
+            constraint_data: {
+                n_qubits: 4,
+                topology: {
+                    coupling_map: [
+                        [0, 1],
+                        [1, 2],
+                        [2, 3],
+                    ],
+                    qubit_labels: {
+                        '0': 'q0',
+                        '1': 'q1',
+                        '2': 'q2',
+                        '3': 'q3',
+                    },
+                },
+            },
+        },
+        catalog,
+        {
+            device: {
+                qubit_labels: { $0: 'q0', $1: 'q1', $2: 'q2' },
+                enabled_qubits: ['$0', '$1', '$2'],
+            },
+        },
+    );
+    assert.equal(model.physicalQubits, 4);
+    assert.equal(model.live?.qubits, 3);
+    assert.deepEqual(model.coupling?.edges, [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+    ]);
+    assert.deepEqual(model.live?.coupling?.edges, [
+        [0, 1],
+        [1, 2],
+    ]);
+    const html = backendDetailsHtml('nonce', model);
+    assert.match(html, /Live \(3\)/);
+    assert.match(html, /Physical \(4\)/);
+    assert.doesNotMatch(html, /Live \(2\)/);
+    assert.match(html, /data-view="physical" hidden/);
 });
 
 test('coupling layout follows the website distance embedding', () => {
@@ -135,10 +290,35 @@ test('coupling layout follows the website distance embedding', () => {
         }
     }
     const grid = layoutCoupling(edges, edges, null, false);
-    const xs = new Set(grid.nodes.map((node) => Math.round(node.x / 8)));
-    const ys = new Set(grid.nodes.map((node) => Math.round(node.y / 8)));
-    assert.ok(xs.size >= 3);
-    assert.ok(ys.size >= 3);
+    const placed = new Map(grid.nodes.map((node) => [node.id, node]));
+    assert.equal(placed.get(0)?.x, 0);
+    assert.equal(placed.get(0)?.y, 0);
+    assert.ok((placed.get(1)?.x ?? 0) > (placed.get(0)?.x ?? 0));
+    assert.equal(placed.get(1)?.y, placed.get(0)?.y);
+    assert.equal(placed.get(3)?.x, placed.get(0)?.x);
+    assert.ok((placed.get(3)?.y ?? 0) > (placed.get(0)?.y ?? 0));
+
+    const wide: [number, number][] = [];
+    const columns = 12;
+    const rows = 9;
+    for (let row = 0; row < rows; row += 1) {
+        for (let col = 0; col < columns; col += 1) {
+            const id = row * columns + col;
+            if (col + 1 < columns) {
+                wide.push([id, id + 1]);
+            }
+            if (row + 1 < rows) {
+                wide.push([id, id + columns]);
+            }
+        }
+    }
+    const lattice = layoutCoupling(wide, wide, null, false);
+    const chip = new Map(lattice.nodes.map((node) => [node.id, node]));
+    assert.equal(chip.get(1)?.y, chip.get(0)?.y);
+    assert.ok((chip.get(1)?.x ?? 0) > (chip.get(0)?.x ?? 0));
+    assert.equal(chip.get(11)?.y, chip.get(0)?.y);
+    assert.equal(chip.get(12)?.x, chip.get(0)?.x);
+    assert.ok((chip.get(12)?.y ?? 0) > (chip.get(0)?.y ?? 0));
 
     const clique: [number, number][] = [];
     for (let a = 0; a < 4; a += 1) {

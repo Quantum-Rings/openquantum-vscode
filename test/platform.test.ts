@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
     backendLight,
     chooseCheapest,
+    isOrganizationUnavailable,
     OpenQuantumClient,
     PlatformError,
     preparationPayload,
@@ -216,8 +217,8 @@ test('overlapping calls share one token fetch', async () => {
     assert.equal(tokenCalls, 1);
     release(jsonResponse(200, { access_token: 'token-1', expires_in: 300 }));
     const [left, right] = await Promise.all([first, second]);
-    assert.equal(left[0]?.name, 'Lab');
-    assert.equal(right[0]?.name, 'Lab');
+    assert.equal(left.organizations[0]?.name, 'Lab');
+    assert.equal(right.organizations[0]?.name, 'Lab');
     assert.equal(tokenCalls, 1);
 });
 
@@ -257,14 +258,118 @@ test('a rejected token is refreshed once for overlapping calls', async () => {
         client.listOrganizations(),
         client.listOrganizations(),
     ]);
-    assert.equal(orgs[0][0]?.name, 'Lab');
-    assert.equal(orgs[1][0]?.name, 'Lab');
+    assert.equal(orgs[0].organizations[0]?.name, 'Lab');
+    assert.equal(orgs[1].organizations[0]?.name, 'Lab');
     assert.equal(tokenCalls, 2);
     assert.ok(authorizations.includes('Bearer token-2'));
     assert.equal(
         authorizations.filter((value) => value === 'Bearer token-1').length,
         2,
     );
+});
+
+test('organization pages send one name search and do not walk the cursor', async () => {
+    const urls: string[] = [];
+    const client = new OpenQuantumClient(
+        endpoints,
+        { clientId: 's_test', clientSecret: 'secret' },
+        async (url) => {
+            const href = String(url);
+            urls.push(href);
+            if (href.endsWith('/token')) {
+                return jsonResponse(200, {
+                    access_token: 'token-1',
+                    expires_in: 300,
+                });
+            }
+            if (href.includes('/v1/users/organizations')) {
+                return jsonResponse(200, {
+                    organizations: [{ id: 'org-2', name: 'Other Lab' }],
+                    pagination: { next_cursor: 'more' },
+                });
+            }
+            if (href.includes('/v1/organizations/org-9')) {
+                return jsonResponse(200, { id: 'org-9', name: 'Saved Lab' });
+            }
+            throw new Error(`unexpected ${href}`);
+        },
+        async () => undefined,
+    );
+    const page = await client.listOrganizations({
+        cursor: 'next-1',
+        name: ' Lab ',
+    });
+    assert.equal(page.nextCursor, null);
+    assert.equal(page.organizations[0]?.name, 'Other Lab');
+    const listUrl = urls.find((href) =>
+        href.includes('/v1/users/organizations'),
+    );
+    assert.ok(listUrl);
+    assert.match(listUrl, /limit=20/);
+    assert.match(listUrl, /cursor=next-1/);
+    assert.match(listUrl, /name=Lab/);
+    assert.equal(
+        urls.filter((href) => href.includes('/v1/users/organizations')).length,
+        1,
+    );
+    const saved = await client.getOrganization('org-9');
+    assert.equal(saved.name, 'Saved Lab');
+});
+
+test('a full organization page keeps its cursor and does not request the next one', async () => {
+    let listCalls = 0;
+    const client = new OpenQuantumClient(
+        endpoints,
+        { clientId: 's_test', clientSecret: 'secret' },
+        async (url) => {
+            const href = String(url);
+            if (href.endsWith('/token')) {
+                return jsonResponse(200, {
+                    access_token: 'token-1',
+                    expires_in: 300,
+                });
+            }
+            listCalls += 1;
+            return jsonResponse(200, {
+                organizations: Array.from({ length: 20 }, (_, index) => ({
+                    id: `org-${index}`,
+                    name: `Lab ${index}`,
+                })),
+                pagination: { next_cursor: 'more' },
+            });
+        },
+        async () => undefined,
+    );
+    const page = await client.listOrganizations();
+    assert.equal(page.organizations.length, 20);
+    assert.equal(page.nextCursor, 'more');
+    assert.equal(listCalls, 1);
+});
+
+test('a missing organization is distinct from terms of use', () => {
+    assert.equal(
+        isOrganizationUnavailable(
+            new PlatformError('missing', 404, 'NOT_FOUND'),
+        ),
+        true,
+    );
+    assert.equal(
+        isOrganizationUnavailable(new PlatformError('missing', 404)),
+        true,
+    );
+    assert.equal(
+        isOrganizationUnavailable(
+            new PlatformError('nope', 403, 'ORG_MEMBERSHIP_REQUIRED'),
+        ),
+        true,
+    );
+    assert.equal(
+        isOrganizationUnavailable(
+            new PlatformError('terms', 403, 'TERMS_OF_USE_REQUIRED'),
+        ),
+        false,
+    );
+    assert.equal(isOrganizationUnavailable(new Error('nope')), false);
 });
 
 test('backend and job lists send the organization so private systems are included', async () => {
@@ -317,6 +422,8 @@ test('backend and job lists send the organization so private systems are include
                             completed_at: '2026-01-02T04:00:00.000Z',
                             credits_used: 3,
                             execution_plan_name: 'Spark',
+                            calibration_data_url:
+                                'https://example.test/cal.json',
                         },
                     ],
                     pagination: { next_cursor: null },
@@ -337,6 +444,7 @@ test('backend and job lists send the organization so private systems are include
     assert.equal(jobs.jobs[0].backendName, 'Forte');
     assert.equal(jobs.jobs[0].completedAt, '2026-01-02T04:00:00.000Z');
     assert.equal(jobs.jobs[0].executionPlanName, 'Spark');
+    assert.equal(jobs.jobs[0].hasCalibration, true);
 });
 
 test('a terms-of-use response uses the SDK message', async () => {

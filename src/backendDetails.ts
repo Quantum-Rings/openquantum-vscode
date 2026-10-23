@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+    formatCalibrationStamp,
+    summarizeCalibration,
+    type CalibrationBasics,
+    type CalibrationFigure,
+} from './calibrationSummary';
+import {
     couplingSvg,
     layoutCoupling,
     normalizeCouplingEdges,
     type CouplingLayout,
 } from './couplingMap';
+import { liveCouplingFromCalibration } from './liveCoupling';
 
 export interface BackendCatalogFacts {
     id: string;
@@ -50,6 +57,19 @@ export interface BackendDetailModel {
     limits: NamedValue[];
     coupling: CouplingLayout | null;
     couplingNote: string | null;
+    /** Chip size from n_qubits. Null when the device does not publish one. */
+    physicalQubits: number | null;
+    /** Offered qubits from the calibration snapshot. Null when no snapshot applies. */
+    live: {
+        coupling: CouplingLayout | null;
+        qubits: number;
+        note: string | null;
+    } | null;
+    calibrationAvailable: boolean;
+    /** 1Q, 2Q, T1, and T2 from the calibration snapshot. Null when it is not calibration. */
+    calibration: CalibrationBasics | null;
+    /** Website stamp for calibration_updated_at. An em dash when it is missing. */
+    calibrationUpdated: string;
 }
 
 const FEATURE_INFO: Record<string, { label: string; description: string }> = {
@@ -61,6 +81,11 @@ const FEATURE_INFO: Record<string, { label: string; description: string }> = {
         label: 'Mid-Circuit Measurement',
         description:
             'Measure qubits in the middle of a circuit (enables dynamic circuits).',
+    },
+    explicit_measure: {
+        label: 'Explicit Measurement',
+        description:
+            'A program that declares classical bits must include a measure. A program with no classical register is allowed.',
     },
     dynamic_circuits: {
         label: 'Dynamic Circuits',
@@ -138,6 +163,36 @@ const FEATURE_INFO: Record<string, { label: string; description: string }> = {
         label: 'Noise Pragmas',
         description: 'Noise injection pragmas for simulation.',
     },
+    multiple_registers: {
+        label: 'Multiple Registers',
+        description: 'More than one qubit register is allowed.',
+    },
+    physical_virtual_mix: {
+        label: 'Physical and Virtual Mix',
+        description:
+            'Physical qubits ($N) and virtual registers may be used in the same program.',
+    },
+    relaxed_virtual_qubits: {
+        label: 'Relaxed Virtual Qubits',
+        description: 'Virtual qubit indices may start above 0 or leave gaps.',
+    },
+    bare_qubit_indexing: {
+        label: 'Bare Qubit Indexing',
+        description: 'A bare qubit declaration may be indexed.',
+    },
+    duration_boxes: {
+        label: 'Duration Boxes',
+        description: 'A box may include a duration.',
+    },
+    register_concat: {
+        label: 'Register Concatenation',
+        description: 'Qubit registers may be concatenated with ++.',
+    },
+    mixed_measurement_result_pragmas: {
+        label: 'Mixed Measurement and Result Pragmas',
+        description:
+            'A measure may appear in the same program as a result pragma.',
+    },
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -146,31 +201,45 @@ type JsonRecord = Record<string, unknown>;
 export function parseBackendDetails(
     payload: unknown,
     catalog: BackendCatalogFacts,
+    calibration?: unknown,
 ): BackendDetailModel {
     const root = asRecord(payload) ?? {};
     const constraint = asRecord(root.constraint_data) ?? {};
     const topology = asRecord(constraint.topology) ?? {};
-    const physical = asEdges(topology.physical_coupling_map);
-    const operable = asEdges(topology.operable_coupling_map);
-    const fallback = asEdges(topology.coupling_map);
-    const drawnRaw = operable.length > 0 ? operable : fallback;
+    // coupling_map is the physical chip. A calibration document narrows it
+    // to the qubits that snapshot offers.
+    const drawnRaw = asEdges(topology.coupling_map);
     const directed = topology.directed_edges === true;
     const drawn = normalizeCouplingEdges(drawnRaw, directed);
-    const layoutEdges = normalizeCouplingEdges(
-        physical.length > 0 ? physical : drawnRaw,
-        false,
-    );
-    const enabled = asIntegers(topology.enabled_indices);
     const coupling =
-        drawn.length > 0
+        drawn.length > 0 ? layoutCoupling(drawn, drawn, null, directed) : null;
+    const qubits = finiteNumber(constraint.n_qubits);
+    const liveRaw = calibration
+        ? liveCouplingFromCalibration(
+              drawnRaw,
+              labelMap(topology.qubit_labels),
+              calibration,
+          )
+        : null;
+    const liveEdges = liveRaw
+        ? normalizeCouplingEdges(liveRaw.edges, directed)
+        : [];
+    const liveCoupling =
+        liveRaw && liveEdges.length > 0
             ? layoutCoupling(
-                  drawn,
-                  layoutEdges,
-                  enabled.length > 0 ? enabled : null,
+                  liveEdges,
+                  drawn.length > 0 ? drawn : liveEdges,
+                  liveRaw.enabledIndices,
                   directed,
               )
             : null;
-    const qubits = finiteNumber(constraint.n_qubits);
+    const live = liveRaw
+        ? {
+              coupling: liveCoupling,
+              qubits: liveRaw.enabledIndices.length,
+              note: couplingNote(liveCoupling, directed),
+          }
+        : null;
     return {
         id: catalog.id,
         name: text(root.name) || catalog.name,
@@ -188,11 +257,13 @@ export function parseBackendDetails(
         features: asFeatures(constraint.features),
         limits: asLimits(constraint.limits),
         coupling,
-        couplingNote: couplingNote(
-            coupling,
-            enabled,
-            physical.length,
-            directed,
+        couplingNote: couplingNote(coupling, directed),
+        physicalQubits: qubits != null && qubits > 0 ? qubits : null,
+        live,
+        calibrationAvailable: text(root.calibration_data_url).length > 0,
+        calibration: calibration ? summarizeCalibration(calibration) : null,
+        calibrationUpdated: formatCalibrationStamp(
+            text(root.calibration_updated_at) || null,
         ),
     };
 }
@@ -201,7 +272,6 @@ export function backendDetailsHtml(
     nonce: string,
     model: BackendDetailModel,
 ): string {
-    const map = model.coupling ? couplingSvg(model.coupling) : '';
     const queue = String(model.queueDepth ?? 0);
     return `<!DOCTYPE html>
 <html lang="en">
@@ -212,6 +282,7 @@ export function backendDetailsHtml(
 <title>${escapeHtml(model.name)}</title>
 <style nonce="${nonce}">
   body { margin: 0; padding: 28px 32px 48px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); font-size: 13px; line-height: 1.45; }
+  button { font: inherit; cursor: pointer; appearance: none; border: 0; background: transparent; color: inherit; }
   main { max-width: 920px; margin: 0 auto; }
   .eyebrow { margin: 0 0 12px; font-size: 22px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--vscode-foreground); }
   h1 { margin: 4px 0 6px; font-size: 28px; font-weight: 650; line-height: 1.15; }
@@ -244,7 +315,15 @@ export function backendDetailsHtml(
   .card, .section { border: 1px solid color-mix(in srgb, #95ad9f 15%, transparent); border-radius: 10px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
   .card { padding: 14px 16px; }
   .card h2, .section h2 { margin: 0 0 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #50bc83; }
+  h2.with-beta { display: flex; align-items: center; gap: 8px; }
+  .topo-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 10px; }
+  .topo-head h2 { margin: 0; }
+  .toggles { display: inline-flex; border: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent); border-radius: 8px; padding: 2px; }
+  button.toggle { margin: 0; padding: 4px 10px; border-radius: 6px; background: transparent; color: #4f5456; font-size: 12px; font-weight: 500; line-height: 1.4; }
+  body.vscode-dark button.toggle { color: #95ad9f; }
+  button.toggle.on, body.vscode-dark button.toggle.on { background: rgba(80, 188, 131, 0.15); color: #50bc83; font-weight: 500; }
   .row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .row strong { font-variant-numeric: tabular-nums; font-weight: 500; }
   .row span:first-child { color: #4f5456; }
   body.vscode-dark .row span:first-child { color: #95ad9f; }
   .section { padding: 16px; margin: 0 0 16px; }
@@ -255,7 +334,8 @@ export function backendDetailsHtml(
   .map-hover { font-size: 11px; color: #4f5456; min-width: 0; }
   body.vscode-dark .map-hover { color: #95ad9f; }
   .map-hover strong { color: var(--vscode-foreground); font-weight: 650; }
-  .map { width: 100%; height: auto; display: block; background: var(--vscode-editor-background); }
+  .map-stage { height: 420px; }
+  .map { width: 100%; height: 100%; display: block; background: var(--vscode-editor-background); }
   .qubit { cursor: pointer; }
   .qubit .label { pointer-events: none; }
   .map.dimming .qubit { opacity: 0.22; }
@@ -288,6 +368,10 @@ export function backendDetailsHtml(
   .ops { display: flex; flex-wrap: wrap; gap: 6px; }
   .op { font-family: var(--vscode-editor-font-family); font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--vscode-textCodeBlock-background); }
   .hint { margin: 8px 0 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
+  button.calibration { display: inline-flex; align-items: center; margin-top: 12px; padding: 0; border: 0; background: transparent; color: #50bc83; font-size: 12px; font-weight: 500; }
+  button.calibration:hover { text-decoration: underline; }
+  .beta { display: inline-flex; align-items: center; border-radius: 999px; background: rgba(245, 158, 11, 0.15); color: #d97706; font-size: 10px; font-weight: 650; letter-spacing: 0; line-height: 1.4; text-transform: none; padding: 1px 6px; }
+  body.vscode-dark .beta { color: #fbbf24; }
 </style>
 </head>
 <body>
@@ -319,14 +403,13 @@ export function backendDetailsHtml(
               : '<p class="empty">Limits not published for this backend.</p>'
       }
     </section>
+    <section class="card">
+      <h2 class="with-beta">Calibration <span class="beta">Beta</span></h2>
+      ${calibrationBody(model)}
+    </section>
   </div>
   <section class="section">
-    <h2>Qubit Topology</h2>
-    ${
-        map
-            ? `${mapFrame(model, map)}${model.couplingNote ? `<p class="note">${escapeHtml(model.couplingNote)}</p>` : ''}${hoverScript(nonce)}`
-            : '<p class="empty">No coupling map data available for this device. Topology may be unpublished, or this backend is a fully connected simulator.</p>'
-    }
+    ${topologySection(nonce, model)}
   </section>
   <section class="section">
     <h2>Device features</h2>
@@ -367,108 +450,216 @@ ${submitScript(nonce)}
 </html>`;
 }
 
-function mapFrame(model: BackendDetailModel, svg: string): string {
-    const coupling = model.coupling;
-    if (!coupling) {
-        return svg;
+function topologySection(nonce: string, model: BackendDetailModel): string {
+    const toggles = model.live
+        ? `<div class="toggles" role="group" aria-label="Coupling map">${viewButton('live', 'Live', model.live.qubits, true)}${viewButton('physical', 'Physical', model.physicalQubits, false)}</div>`
+        : '';
+    const head = `<div class="topo-head"><h2>Qubit Topology</h2>${toggles}</div>`;
+    const live = model.live
+        ? topologyPanel(
+              'live',
+              false,
+              model.live.coupling
+                  ? mapFrame(
+                        model.live.coupling,
+                        model.qubits,
+                        couplingSvg(model.live.coupling),
+                    )
+                  : '<p class="empty">This calibration offers no edges on the physical coupling map.</p>',
+              model.live.note,
+          )
+        : '';
+    const physical = model.coupling
+        ? topologyPanel(
+              'physical',
+              model.live != null,
+              mapFrame(
+                  model.coupling,
+                  model.qubits,
+                  couplingSvg(model.coupling),
+              ),
+              model.couplingNote,
+          )
+        : '';
+    if (!live && !physical) {
+        return `${head}<p class="empty">No coupling map data available for this device. Topology may be unpublished, or this backend is a fully connected simulator.</p>`;
     }
+    const maps = Boolean(model.coupling || model.live?.coupling);
+    return `${head}${live}${physical}${maps ? hoverScript(nonce) : ''}${model.live ? toggleScript(nonce) : ''}`;
+}
+
+function viewButton(
+    view: 'live' | 'physical',
+    label: string,
+    qubits: number | null,
+    selected: boolean,
+): string {
+    const count = qubits == null ? '' : ` (${qubits})`;
+    return `<button type="button" class="toggle${selected ? ' on' : ''}" data-view="${view}">${label}${count}</button>`;
+}
+
+function topologyPanel(
+    view: 'live' | 'physical',
+    hidden: boolean,
+    body: string,
+    note: string | null,
+): string {
+    return `<div class="topo" data-view="${view}"${hidden ? ' hidden' : ''}>${body}${note ? `<p class="note">${escapeHtml(note)}</p>` : ''}</div>`;
+}
+
+function mapFrame(
+    coupling: CouplingLayout,
+    chipQubits: number | null,
+    svg: string,
+): string {
     const onChip =
-        model.qubits != null && model.qubits > coupling.nodes.length
-            ? ` · ${model.qubits} on chip`
+        chipQubits != null && chipQubits > coupling.nodes.length
+            ? ` · ${chipQubits} on chip`
             : '';
     const dense = coupling.dense
         ? '<span class="map-dense">All-to-all</span>'
         : '';
-    return `<div class="map-wrap"><div class="map-bar"><span class="map-count">${coupling.nodes.length} qubits · ${coupling.edges.length} edges${onChip}</span>${dense}<span id="map-hover" class="map-hover">Hover or tap a qubit to highlight its neighbors</span></div>${svg}</div>`;
+    return `<div class="map-wrap"><div class="map-bar"><span class="map-count">${coupling.nodes.length} qubits · ${coupling.edges.length} edges${onChip}</span>${dense}<span class="map-hover">Hover or tap a qubit to highlight its neighbors</span></div><div class="map-stage">${svg}</div></div>`;
+}
+
+function calibrationBody(model: BackendDetailModel): string {
+    if (!model.calibrationAvailable) {
+        return '<p class="empty">No calibration published for this backend.</p>';
+    }
+    const summary = model.calibration;
+    const figures =
+        summary == null
+            ? ''
+            : summary.fidelity1q ||
+                summary.fidelity2q ||
+                summary.t1 ||
+                summary.t2
+              ? [
+                    figureRow('1Q fidelity', summary.fidelity1q),
+                    figureRow('2Q fidelity', summary.fidelity2q),
+                    figureRow('T1', summary.t1),
+                    figureRow('T2', summary.t2),
+                ].join('')
+              : '<p class="empty">No 1Q, 2Q, T1, or T2 figures in this snapshot.</p>';
+    return `${figures}${stat('Updated', model.calibrationUpdated)}<button id="download-calibration" class="calibration" type="button" data-backend="${escapeHtml(model.shortCode || model.id)}">Open calibration</button>`;
+}
+
+function figureRow(label: string, figure: CalibrationFigure | null): string {
+    const detail = figure?.detail
+        ? ` title="${escapeHtml(figure.detail)}"`
+        : '';
+    return `<div class="row"${detail}><span>${escapeHtml(label)}</span><strong>${escapeHtml(figure?.text ?? '—')}</strong></div>`;
 }
 
 function hoverScript(nonce: string): string {
     return `<script nonce="${nonce}">
 (function () {
-  var svg = document.querySelector('.map');
-  var hover = document.getElementById('map-hover');
-  if (!svg || !hover) return;
   var idle = 'Hover or tap a qubit to highlight its neighbors';
-  var track = svg.getAttribute('data-track') === '1';
-  var qubits = Array.prototype.slice.call(svg.querySelectorAll('.qubit'));
-  var edges = Array.prototype.slice.call(svg.querySelectorAll('.edge'));
-  var neighbors = new Map();
-  var add = function (from, to) {
-    var list = neighbors.get(from) || [];
-    if (list.indexOf(to) === -1) list.push(to);
-    neighbors.set(from, list);
-  };
-  edges.forEach(function (edge) {
-    var a = Number(edge.getAttribute('data-a'));
-    var b = Number(edge.getAttribute('data-b'));
-    add(a, b);
-    add(b, a);
-  });
-  neighbors.forEach(function (list, id) {
-    neighbors.set(id, list.sort(function (left, right) { return left - right; }));
-  });
-  var sticky = false;
-  var clear = function (force) {
-    if (sticky && !force) return;
-    sticky = false;
-    svg.classList.remove('dimming');
-    qubits.forEach(function (node) { node.classList.remove('hi', 'root'); });
-    edges.forEach(function (edge) { edge.classList.remove('hi'); });
-    hover.textContent = idle;
-  };
-  var show = function (id) {
-    var list = neighbors.get(id) || [];
-    var hood = {};
-    hood[id] = true;
-    list.forEach(function (item) { hood[item] = true; });
-    svg.classList.add('dimming');
-    qubits.forEach(function (node) {
-      var nodeId = Number(node.getAttribute('data-id'));
-      node.classList.toggle('hi', hood[nodeId] === true);
-      node.classList.toggle('root', nodeId === id);
-    });
+  Array.prototype.slice.call(document.querySelectorAll('.map-wrap')).forEach(function (wrap) {
+    var svg = wrap.querySelector('.map');
+    var hover = wrap.querySelector('.map-hover');
+    if (!svg || !hover) return;
+    var track = svg.getAttribute('data-track') === '1';
+    var qubits = Array.prototype.slice.call(svg.querySelectorAll('.qubit'));
+    var edges = Array.prototype.slice.call(svg.querySelectorAll('.edge'));
+    var neighbors = new Map();
+    var add = function (from, to) {
+      var list = neighbors.get(from) || [];
+      if (list.indexOf(to) === -1) list.push(to);
+      neighbors.set(from, list);
+    };
     edges.forEach(function (edge) {
       var a = Number(edge.getAttribute('data-a'));
       var b = Number(edge.getAttribute('data-b'));
-      edge.classList.toggle('hi', hood[a] === true && hood[b] === true);
+      add(a, b);
+      add(b, a);
     });
-    var status = '';
-    if (track) {
-      var current = qubits.filter(function (node) {
-        return Number(node.getAttribute('data-id')) === id;
-      })[0];
-      status = current && current.getAttribute('data-on') === '1' ? ' · enabled' : ' · idle';
-    }
-    var links = list.length ? ' · ' + list.join(', ') : ' · no neighbors';
-    hover.textContent = '';
-    var name = document.createElement('strong');
-    name.textContent = 'Qubit ' + id;
-    hover.appendChild(name);
-    hover.appendChild(document.createTextNode(status + ' · deg ' + list.length + links));
-  };
-  var qubitFrom = function (target) {
-    return target && target.closest ? target.closest('.qubit') : null;
-  };
-  svg.addEventListener('mouseover', function (event) {
-    var node = qubitFrom(event.target);
-    if (!node) return;
-    show(Number(node.getAttribute('data-id')));
+    neighbors.forEach(function (list, id) {
+      neighbors.set(id, list.sort(function (left, right) { return left - right; }));
+    });
+    var sticky = false;
+    var clear = function (force) {
+      if (sticky && !force) return;
+      sticky = false;
+      svg.classList.remove('dimming');
+      qubits.forEach(function (node) { node.classList.remove('hi', 'root'); });
+      edges.forEach(function (edge) { edge.classList.remove('hi'); });
+      hover.textContent = idle;
+    };
+    var show = function (id) {
+      var list = neighbors.get(id) || [];
+      var hood = {};
+      hood[id] = true;
+      list.forEach(function (item) { hood[item] = true; });
+      svg.classList.add('dimming');
+      qubits.forEach(function (node) {
+        var nodeId = Number(node.getAttribute('data-id'));
+        node.classList.toggle('hi', hood[nodeId] === true);
+        node.classList.toggle('root', nodeId === id);
+      });
+      edges.forEach(function (edge) {
+        var a = Number(edge.getAttribute('data-a'));
+        var b = Number(edge.getAttribute('data-b'));
+        edge.classList.toggle('hi', hood[a] === true && hood[b] === true);
+      });
+      var status = '';
+      if (track) {
+        var current = qubits.filter(function (node) {
+          return Number(node.getAttribute('data-id')) === id;
+        })[0];
+        status = current && current.getAttribute('data-on') === '1' ? ' · enabled' : ' · idle';
+      }
+      var links = list.length ? ' · ' + list.join(', ') : ' · no neighbors';
+      hover.textContent = '';
+      var name = document.createElement('strong');
+      name.textContent = 'Qubit ' + id;
+      hover.appendChild(name);
+      hover.appendChild(document.createTextNode(status + ' · deg ' + list.length + links));
+    };
+    var qubitFrom = function (target) {
+      return target && target.closest ? target.closest('.qubit') : null;
+    };
+    svg.addEventListener('mouseover', function (event) {
+      var node = qubitFrom(event.target);
+      if (!node) return;
+      show(Number(node.getAttribute('data-id')));
+    });
+    svg.addEventListener('mouseout', function (event) {
+      var node = qubitFrom(event.target);
+      if (!node) return;
+      var next = qubitFrom(event.relatedTarget);
+      if (next === node) return;
+      clear(false);
+    });
+    svg.addEventListener('click', function (event) {
+      var node = qubitFrom(event.target);
+      if (!node) {
+        clear(true);
+        return;
+      }
+      sticky = true;
+      show(Number(node.getAttribute('data-id')));
+    });
   });
-  svg.addEventListener('mouseout', function (event) {
-    var node = qubitFrom(event.target);
-    if (!node) return;
-    var next = qubitFrom(event.relatedTarget);
-    if (next === node) return;
-    clear(false);
-  });
-  svg.addEventListener('click', function (event) {
-    var node = qubitFrom(event.target);
-    if (!node) {
-      clear(true);
-      return;
-    }
-    sticky = true;
-    show(Number(node.getAttribute('data-id')));
+})();
+</script>`;
+}
+
+function toggleScript(nonce: string): string {
+    return `<script nonce="${nonce}">
+(function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.toggle'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('.topo'));
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var view = button.getAttribute('data-view');
+      buttons.forEach(function (item) {
+        item.classList.toggle('on', item === button);
+      });
+      panels.forEach(function (panel) {
+        panel.hidden = panel.getAttribute('data-view') !== view;
+      });
+    });
   });
 })();
 </script>`;
@@ -492,6 +683,15 @@ function submitScript(nonce: string): string {
       backendId: button.getAttribute('data-backend') || ''
     });
   });
+  var calibration = document.getElementById('download-calibration');
+  if (calibration) {
+    calibration.addEventListener('click', function () {
+      vscodeApi.postMessage({
+        command: 'downloadCalibration',
+        backendId: calibration.getAttribute('data-backend') || ''
+      });
+    });
+  }
 })();
 </script>`;
 }
@@ -518,8 +718,6 @@ function sparkMark(): string {
 
 function couplingNote(
     coupling: CouplingLayout | null,
-    enabled: number[],
-    physicalEdges: number,
     directed: boolean,
 ): string | null {
     if (!coupling || coupling.edges.length === 0) {
@@ -527,13 +725,6 @@ function couplingNote(
     }
     const qubits = coupling.nodes.length;
     const edges = coupling.edges.length;
-    if (enabled.length > 0) {
-        const physical =
-            physicalEdges > 0
-                ? ` ${physicalEdges} physical edges are on the chip.`
-                : '';
-        return `Operable connectivity: ${enabled.length} qubits, ${edges} edges.${physical} Muted qubits are present and not enabled.`;
-    }
     if (coupling.dense) {
         return `${qubits} qubits and ${edges} edges. Connectivity is dense, so the map is drawn as a circle.`;
     }
@@ -611,6 +802,20 @@ function limitLabel(key: string): string {
         .join(' ');
 }
 
+function labelMap(value: unknown): Record<string, string> | null {
+    const row = asRecord(value);
+    if (!row) {
+        return null;
+    }
+    const labels: Record<string, string> = {};
+    for (const [key, name] of Object.entries(row)) {
+        if (typeof name === 'string' && name.trim()) {
+            labels[key] = name;
+        }
+    }
+    return Object.keys(labels).length > 0 ? labels : null;
+}
+
 function asEdges(value: unknown): number[][] {
     if (!Array.isArray(value)) {
         return [];
@@ -623,16 +828,6 @@ function asEdges(value: unknown): number[][] {
         edges.push([Number(item[0]), Number(item[1])]);
     }
     return edges;
-}
-
-function asIntegers(value: unknown): number[] {
-    if (!Array.isArray(value)) {
-        return [];
-    }
-    return value.filter(
-        (item): item is number =>
-            typeof item === 'number' && Number.isInteger(item),
-    );
 }
 
 function asStrings(value: unknown): string[] {

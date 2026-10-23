@@ -6,6 +6,8 @@ export const PUBLIC_PLAN_ID = '072f7eb6-574b-4bae-aafa-d3399c4abe7a';
 
 const TOKEN_LEEWAY_MS = 30_000;
 const PAGE_LIMIT = 100;
+/** One settings page. The management API caps this at 100. */
+const ORG_PAGE_LIMIT = 20;
 const MAX_PAGES = 50;
 
 export interface PlatformEndpoints {
@@ -43,6 +45,11 @@ export interface BackendClassInfo {
 export interface OrganizationInfo {
     id: string;
     name: string;
+}
+
+export interface OrganizationPage {
+    organizations: OrganizationInfo[];
+    nextCursor: string | null;
 }
 
 export interface CreditBalance {
@@ -119,6 +126,10 @@ export interface PreparationResult {
     message: string | null;
     quote: QuotePlan[];
     backendClassId: string | null;
+    inputFormat: string | null;
+    inputDataUrl: string | null;
+    processedDataUrl: string | null;
+    circuitViewUrl: string | null;
 }
 
 export interface JobRecord {
@@ -136,6 +147,7 @@ export interface JobRecord {
     backendClassId: string | null;
     executionPlanName: string | null;
     preparationId: string | null;
+    inputDataUrl: string | null;
 }
 
 export interface JobSummary {
@@ -150,6 +162,8 @@ export interface JobSummary {
     completedAt: string | null;
     creditsUsed: number | null;
     executionPlanName: string | null;
+    /** True when this job has a calibration snapshot to download. */
+    hasCalibration: boolean;
 }
 
 export interface JobPage {
@@ -184,6 +198,17 @@ export function isNotFound(error: unknown): boolean {
         (error.type === 'NOT_FOUND' ||
             (error.type == null && error.statusCode === 404))
     );
+}
+
+/** The saved organization is missing or this account can no longer use it. */
+export function isOrganizationUnavailable(error: unknown): boolean {
+    if (!(error instanceof PlatformError)) {
+        return false;
+    }
+    if (isNotFound(error)) {
+        return true;
+    }
+    return error.statusCode === 403 && error.type === 'ORG_MEMBERSHIP_REQUIRED';
 }
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -301,16 +326,54 @@ export class OpenQuantumClient {
         private readonly sleep: Sleep = delay,
     ) {}
 
-    async listOrganizations(): Promise<OrganizationInfo[]> {
-        return this.listPages(
+    async listOrganizations(options?: {
+        cursor?: string;
+        name?: string;
+        limit?: number;
+    }): Promise<OrganizationPage> {
+        const name = options?.name?.trim();
+        const limit = options?.limit ?? ORG_PAGE_LIMIT;
+        const data = await this.request(
+            'GET',
             this.endpoints.managementBase,
             '/v1/users/organizations',
-            'organizations',
-            (row) => ({
-                id: String(row.id),
-                name: String(row.name ?? ''),
-            }),
+            {
+                limit,
+                cursor: options?.cursor,
+                name: name ? name : undefined,
+            },
         );
+        const rows = Array.isArray(data.organizations)
+            ? (data.organizations as JsonRecord[])
+            : [];
+        const next =
+            data.pagination && typeof data.pagination === 'object'
+                ? (data.pagination as JsonRecord).next_cursor
+                : undefined;
+        const organizations = rows.map((row) => ({
+            id: String(row.id),
+            name: String(row.name ?? ''),
+        }));
+        // A short page is the end of the list. One organization then has no Load more.
+        const nextCursor =
+            organizations.length < limit
+                ? null
+                : typeof next === 'string' && next.length > 0
+                  ? next
+                  : null;
+        return { organizations, nextCursor };
+    }
+
+    async getOrganization(organizationId: string): Promise<OrganizationInfo> {
+        const data = await this.request(
+            'GET',
+            this.endpoints.managementBase,
+            `/v1/organizations/${encodeURIComponent(organizationId)}`,
+        );
+        return {
+            id: String(data.id ?? organizationId),
+            name: String(data.name ?? ''),
+        };
     }
 
     async listProviders(
@@ -503,7 +566,22 @@ export class OpenQuantumClient {
             message: optionalString(data.message),
             quote: parseQuote(data.quote),
             backendClassId: optionalString(data.backend_class_id),
+            inputFormat: optionalString(data.input_format),
+            inputDataUrl: optionalString(data.input_data_url),
+            processedDataUrl: optionalString(data.processed_data_url),
+            circuitViewUrl: optionalString(data.circuit_view_url),
         };
+    }
+
+    async downloadText(url: string): Promise<string> {
+        const response = await this.fetchImpl(url);
+        if (!response.ok) {
+            throw new PlatformError(
+                `Downloading results failed (${response.status}).`,
+                response.status,
+            );
+        }
+        return response.text();
     }
 
     async createJob(
@@ -837,6 +915,7 @@ function mapJobSummary(data: JsonRecord): JobSummary {
         completedAt: optionalString(data.completed_at),
         creditsUsed: optionalNumber(data.credits_used),
         executionPlanName: optionalString(data.execution_plan_name),
+        hasCalibration: optionalString(data.calibration_data_url) != null,
     };
 }
 
@@ -856,6 +935,7 @@ function mapJob(data: JsonRecord): JobRecord {
         backendClassId: optionalString(data.backend_class_id),
         executionPlanName: optionalString(data.execution_plan_name),
         preparationId: optionalString(data.job_preparation_id),
+        inputDataUrl: optionalString(data.input_data_url),
     };
 }
 

@@ -12,6 +12,8 @@ export interface JobResultPanelHandlers {
     onShowJobs: () => void;
     onOpenBackend: (backendId: string) => void;
     onDownloadResults: (jobId: string) => void;
+    onDownloadCalibration: (jobId: string) => void;
+    onDownloadInput: (jobId: string, which: 'original' | 'processed') => void;
     onSaveText: (filename: string, content: string) => void;
 }
 
@@ -122,6 +124,19 @@ export class JobResultPanel implements vscode.Disposable {
                     this.handlers.onDownloadResults(this.jobId);
                 }
                 return;
+            case 'downloadCalibration':
+                if (this.jobId) {
+                    this.handlers.onDownloadCalibration(this.jobId);
+                }
+                return;
+            case 'downloadInput':
+                if (
+                    this.jobId &&
+                    (data.which === 'original' || data.which === 'processed')
+                ) {
+                    this.handlers.onDownloadInput(this.jobId, data.which);
+                }
+                return;
             case 'saveText': {
                 const filename =
                     typeof data.filename === 'string' ? data.filename : '';
@@ -165,9 +180,22 @@ function jobSignature(model: JobResultModel): string {
         model.executionPlanName ?? '',
         model.message ?? '',
         model.resultsKind,
+        model.countsLocked ? '1' : '0',
+        model.resultsNotice ?? '',
+        digest(model.resultsPreview ?? ''),
         model.canDownload ? '1' : '0',
+        model.canDownloadCalibration ? '1' : '0',
+        model.inputTitle,
+        model.inputLoading ? '1' : '0',
+        model.inputTabs ? '1' : '0',
+        digest(JSON.stringify(model.inputFiles)),
+        digest(JSON.stringify(model.circuit)),
         counts,
     ].join('\n');
+}
+
+function digest(value: string): string {
+    return createHash('sha256').update(value).digest('hex');
 }
 
 function stableCounts(counts: Record<string, number>): string {

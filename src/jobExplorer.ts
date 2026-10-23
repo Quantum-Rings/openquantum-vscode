@@ -153,6 +153,17 @@ function buildRows(counts, controls) {
   });
 }
 
+var MOST_LIKELY_STATE_LIMIT = 32;
+
+function middleEllipsis(value, limit) {
+  if (value.length <= limit) return value;
+  if (limit < 2) return value.slice(0, Math.max(limit, 0));
+  var keep = limit - 1;
+  var head = Math.ceil(keep / 2);
+  var tail = keep - head;
+  return value.slice(0, head) + '…' + value.slice(value.length - tail);
+}
+
 function explorerStats(counts) {
   var entries = Object.keys(counts).map(function (state) { return [state, counts[state]]; });
   if (entries.length === 0) return null;
@@ -256,6 +267,68 @@ function extractResultCounts(data) {
   }
   return null;
 }
+
+function axisTicks(max, integer) {
+  if (!(max > 0)) return { axisMax: 1, ticks: [0, 1] };
+  var rough = max / 4;
+  var pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  if (!isFinite(pow) || pow <= 0) pow = 1;
+  var err = rough / pow;
+  var factor = err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
+  var step = factor * pow;
+  if (integer && step < 1) step = 1;
+  var axisMax = Math.ceil((max - 1e-9) / step) * step;
+  if (!(axisMax > 0)) axisMax = step;
+  var ticks = [];
+  for (var v = 0, guard = 0; v <= axisMax + step * 0.001 && guard < 8; v += step, guard++) {
+    ticks.push(integer ? Math.round(v) : Math.round(v / step) * step);
+  }
+  if (ticks[ticks.length - 1] < axisMax - step * 0.001) ticks.push(axisMax);
+  return { axisMax: axisMax, ticks: ticks };
+}
+
+function formatTick(value, integer) {
+  if (integer) return Math.round(value).toLocaleString('en-US');
+  var abs = Math.abs(value);
+  var digits = abs >= 0.1 || abs === 0 ? 2 : abs >= 0.01 ? 3 : 4;
+  var text = value.toFixed(digits);
+  while (text.indexOf('.') >= 0 && text.charAt(text.length - 1) === '0') {
+    text = text.slice(0, -1);
+  }
+  if (text.charAt(text.length - 1) === '.') text = text.slice(0, -1);
+  return text === '-0' ? '0' : text;
+}
+
+// Glyph width at 11px, and the horizontal run of a -60 degree label.
+var CHART_CHAR_W = 6.8;
+var CHART_LABEL_RUN = CHART_CHAR_W * 0.5;
+
+function chartLabels(plotWidth, count, longest) {
+  var n = Math.max(count | 0, 1);
+  var slot = Math.max(plotWidth, 1) / n;
+  var full = Math.max(longest | 0, 1);
+  var cap = Math.min(full, 24);
+  var fit = Math.floor((slot * 0.92) / CHART_LABEL_RUN);
+  var limit = Math.min(cap, Math.max(fit, 1));
+  var stride = 1;
+  // A label on every bar would stack. Step across until eight characters fit.
+  if (limit < Math.min(cap, 8)) {
+    var want = Math.min(cap, 8);
+    stride = Math.max(1, Math.ceil((want * CHART_LABEL_RUN) / (slot * 0.92)));
+    var stepped = Math.floor((slot * stride * 0.92) / CHART_LABEL_RUN);
+    limit = Math.min(cap, Math.max(stepped, 1));
+  }
+  var drop = Math.ceil(limit * CHART_CHAR_W * Math.sin(Math.PI / 3)) + 10;
+  return { limit: limit, stride: stride, drop: drop };
+}
+
+function chartPadLeft(ticks, integer) {
+  var pad = 36;
+  for (var i = 0; i < ticks.length; i++) {
+    pad = Math.max(pad, formatTick(ticks[i], integer).length * CHART_CHAR_W + 16);
+  }
+  return Math.ceil(pad);
+}
 `;
 
 interface ExplorerFns {
@@ -267,12 +340,24 @@ interface ExplorerFns {
     };
     buildRows: (counts: Counts, controls: ExplorerControls) => ExplorerRow[];
     explorerStats: (counts: Counts) => ExplorerStats | null;
+    middleEllipsis: (value: string, limit: number) => string;
     notebookJson: (counts: Counts | null) => string;
     extractResultCounts: (data: unknown) => Counts | null;
+    axisTicks: (
+        max: number,
+        integer: boolean,
+    ) => { axisMax: number; ticks: number[] };
+    formatTick: (value: number, integer: boolean) => string;
+    chartLabels: (
+        plotWidth: number,
+        count: number,
+        longest: number,
+    ) => { limit: number; stride: number; drop: number };
+    chartPadLeft: (ticks: number[], integer: boolean) => number;
 }
 
 const loadExplorer = new Function(
-    `${EXPLORER_SOURCE}\nreturn { reverseCounts, applyBitOrder, parseCounts, buildRows, explorerStats, notebookJson, extractResultCounts };`,
+    `${EXPLORER_SOURCE}\nreturn { reverseCounts, applyBitOrder, parseCounts, buildRows, explorerStats, middleEllipsis, notebookJson, extractResultCounts, axisTicks, formatTick, chartLabels, chartPadLeft };`,
 ) as () => ExplorerFns;
 
 const explorer = loadExplorer();
@@ -282,7 +367,12 @@ export const applyBitOrder = explorer.applyBitOrder;
 export const parseCounts = explorer.parseCounts;
 export const buildRows = explorer.buildRows;
 export const explorerStats = explorer.explorerStats;
+export const middleEllipsis = explorer.middleEllipsis;
 export const notebookJson = explorer.notebookJson;
+export const axisTicks = explorer.axisTicks;
+export const formatTick = explorer.formatTick;
+export const chartLabels = explorer.chartLabels;
+export const chartPadLeft = explorer.chartPadLeft;
 
 const DEFAULT_CONTROLS: ExplorerControls = {
     valueMode: 'counts',

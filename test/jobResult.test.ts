@@ -21,7 +21,48 @@ function model(overrides: Partial<JobResultModel> = {}): JobResultModel {
         message: 'Finished',
         resultsKind: 'counts',
         counts: { '00': 512, '11': 256 },
+        countsLocked: false,
+        resultsPreview: null,
+        resultsNotice: null,
         canDownload: true,
+        canDownloadCalibration: false,
+        inputTitle: 'OpenQASM',
+        inputLoading: false,
+        inputTabs: true,
+        inputFiles: {
+            original: {
+                text: 'OPENQASM 2.0;\n',
+                error: null,
+                footer: null,
+                canDownload: true,
+            },
+            processed: {
+                text: 'OPENQASM 3.0;\nh q[0];\n',
+                error: null,
+                footer: null,
+                canDownload: true,
+            },
+        },
+        circuit: {
+            status: 'circuit',
+            message: null,
+            detail: null,
+            wires: ['q0'],
+            columnCount: 1,
+            columnWidths: [76],
+            gates: [
+                {
+                    id: '0-0',
+                    column: 0,
+                    label: 'H',
+                    name: 'h',
+                    qubits: [0],
+                    gateKind: 'gate',
+                    line: 2,
+                    boxWidth: 34,
+                },
+            ],
+        },
         ...overrides,
     };
 }
@@ -39,7 +80,7 @@ test('the job window matches the website results explorer', () => {
     assert.match(html, /<script nonce="nonce">/);
     assert.match(html, /const generation = 1;/);
     assert.match(html, /All jobs/);
-    assert.match(html, /Download results/);
+    assert.match(html, /Open result/);
     assert.match(html, />Counts</);
     assert.match(html, /Probabilities/);
     assert.match(html, /Hamming weight/);
@@ -52,6 +93,8 @@ test('the job window matches the website results explorer', () => {
     assert.match(html, /Shots/);
     assert.match(html, /Unique states/);
     assert.match(html, /Most likely/);
+    assert.match(html, /middleEllipsis/);
+    assert.match(html, /\.stat \.state \{/);
     assert.match(html, /Entropy/);
     assert.match(html, />Tier</);
     assert.match(html, /Job ID/);
@@ -74,11 +117,50 @@ test('the job window matches the website results explorer', () => {
     assert.match(html, /Loading results…/);
     assert.match(html, /Results aren't available for this job yet\./);
     assert.match(html, /We couldn't read the results for this job/);
-    assert.match(html, /aren't a measurement-counts histogram/);
+    assert.match(html, /Qblox acquisitions/);
+    assert.match(html, /Open original/);
+    assert.match(html, /Open processed/);
+    assert.match(
+        html,
+        /The diagram follows the processed program, not this file\./,
+    );
+    assert.match(
+        html,
+        /svg\.circuit \.gate-plate \{ fill: var\(--vscode-sideBar-background, var\(--vscode-editor-background\)\);/,
+    );
+    assert.match(html, /plate\.setAttribute\('class', 'gate-plate'\)/);
+    assert.match(html, /svg\.circuit\.labels \{ position: sticky; left: 0;/);
+    assert.match(
+        html,
+        /background: color-mix\(in srgb, var\(--vscode-foreground\) 4%, var\(--vscode-sideBar-background, var\(--vscode-editor-background\)\)\)/,
+    );
+    assert.match(html, /\.source \.line \{ box-sizing: border-box;/);
+    assert.match(
+        html,
+        /#input-tabs, #fullscreen-tabs \{ align-self: flex-start; width: fit-content; \}/,
+    );
+    assert.match(html, /#input-tabs \{ margin: 0 0 12px; \}/);
+    assert.match(html, /\.source \.ln \{[^}]*width: 1\.5rem;/);
+    assert.match(html, /aria-label="Expand input"/);
+    assert.match(html, /aria-label="Expand diagram"/);
+    assert.match(html, /aria-label="Close"/);
+    assert.match(html, /id="fullscreen" class="fullscreen" hidden/);
+    assert.match(html, /Showing the 64 highest counts\./);
+    assert.match(html, /function axisTicks\(max, integer\)/);
+    assert.match(html, /function chartLabels\(plotWidth, count, longest\)/);
+    assert.match(html, /\.chart-wrap \{ overflow: hidden;/);
+    assert.match(html, /text-anchor', 'end'/);
+    assert.match(html, /rotate\(-60 /);
+    assert.match(html, /middleEllipsis\(row\.state, labels\.limit\)/);
+    assert.match(html, /root\.clientWidth/);
+    assert.match(html, /These counts are too large to edit here\./);
     assert.match(html, /No counts to show\./);
     assert.match(html, /No states match the current filters\./);
     assert.match(html, /\[\^\\w\.-]/);
-    assert.doesNotMatch(html, /Calibration/);
+    assert.match(html, /Open calibration/);
+    assert.match(html, /<span class="beta">Beta<\/span>/);
+    assert.match(html, /canDownloadCalibration/);
+    assert.match(html, /command: 'downloadCalibration'/);
     new vm.Script(pageScript(html));
 });
 

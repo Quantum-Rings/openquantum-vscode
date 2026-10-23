@@ -80,7 +80,8 @@ type Point = { x: number; y: number };
 
 /**
  * Same placement as the website coupling graph.
- * Sparse maps use classical MDS of shortest-path distances, then stress refinement.
+ * A row-major lattice is placed by index, row 0 at the top.
+ * Other sparse maps use classical MDS of shortest-path distances, then stress refinement.
  * Dense maps use a circle, which is what the website asks cytoscape to draw.
  */
 export function layoutCoupling(
@@ -120,7 +121,80 @@ export function layoutCoupling(
     };
 }
 
-/** High-quality sparse layout from the website's couplingMapLayout. */
+/**
+ * Row width of a row-major lattice, or null when the edges are not one.
+ * A +1 edge stays inside a row. The other edge length is the row stride.
+ * Every edge has to fit, so one extra diagonal keeps the graph on the
+ * embedding layout.
+ */
+export function latticeWidth(
+    ids: number[],
+    edges: CouplingEdge[],
+): number | null {
+    if (ids.length < 2 || edges.length === 0) {
+        return null;
+    }
+    const maxId = Math.max(...ids);
+    const candidates: number[] = [];
+    for (let e = 0; e < edges.length; e += 1) {
+        const delta = Math.abs(edges[e][0] - edges[e][1]);
+        if (delta > 1 && candidates.indexOf(delta) === -1) {
+            candidates.push(delta);
+        }
+    }
+    if (maxId >= 1 && candidates.indexOf(maxId + 1) === -1) {
+        candidates.push(maxId + 1);
+    }
+
+    let chosen: number | null = null;
+    let chosenVert = 0;
+    for (let c = 0; c < candidates.length; c += 1) {
+        const width = candidates[c];
+        if (width < 2) {
+            continue;
+        }
+        let horiz = 0;
+        let vert = 0;
+        let fits = true;
+        for (let e = 0; e < edges.length; e += 1) {
+            const lo = Math.min(edges[e][0], edges[e][1]);
+            const hi = Math.max(edges[e][0], edges[e][1]);
+            const delta = hi - lo;
+            if (
+                delta === 1 &&
+                Math.floor(lo / width) === Math.floor(hi / width)
+            ) {
+                horiz += 1;
+            } else if (delta === width) {
+                vert += 1;
+            } else {
+                fits = false;
+                break;
+            }
+        }
+        if (!fits || horiz + vert !== edges.length || horiz === 0) {
+            continue;
+        }
+        if (vert === 0 && width !== maxId + 1) {
+            continue;
+        }
+        if (
+            chosen == null ||
+            (vert > 0 && chosenVert === 0) ||
+            (vert > 0 && width < chosen)
+        ) {
+            chosen = width;
+            chosenVert = vert;
+        }
+    }
+    return chosen;
+}
+
+/**
+ * Sparse layout from the website. A row-major lattice is placed by index,
+ * row 0 at the top, so a missing qubit stays an empty cell. Anything else
+ * is MDS, stress refined, then turned so indices read left to right.
+ */
 export function layoutPositions(
     ids: number[],
     edges: CouplingEdge[],
@@ -137,6 +211,18 @@ export function layoutPositions(
         out[ids[0]] = { x: 0, y: 0 };
         return out;
     }
+
+    const width = latticeWidth(ids, edges);
+    if (width != null) {
+        for (const id of ids) {
+            out[id] = {
+                x: (id % width) * idealEdge,
+                y: Math.floor(id / width) * idealEdge,
+            };
+        }
+        return out;
+    }
+
     const dist = allPairsDistance(ids, edges);
     let pts = orientLandscape(ids, classicalMds(dist));
     const seedLen = median(adjacentLengths(ids, edges, pts));
