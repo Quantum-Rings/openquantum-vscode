@@ -25,6 +25,8 @@ export class JobResultPanel implements vscode.Disposable {
     private signature = '';
     private generation = 0;
     private readyGeneration = 0;
+    /** Last model sent to the page. A restored webview asks for it again. */
+    private latestModel: JobResultModel | null = null;
 
     constructor(private readonly handlers: JobResultPanelHandlers) {}
 
@@ -42,7 +44,10 @@ export class JobResultPanel implements vscode.Disposable {
                 'openquantum.jobResult',
                 panelTitle(model),
                 column,
-                { enableScripts: true },
+                // Opening calibration hides this tab. Without this, VS Code
+                // drops the live page and restores the first HTML, which is
+                // still the "Loading input…" snapshot.
+                { enableScripts: true, retainContextWhenHidden: true },
             );
             this.listener = this.panel.webview.onDidReceiveMessage(
                 (message) => {
@@ -57,12 +62,14 @@ export class JobResultPanel implements vscode.Disposable {
                 this.signature = '';
                 this.generation = 0;
                 this.readyGeneration = 0;
+                this.latestModel = null;
                 this.handlers.onClose();
             });
         }
         const sameJob = this.jobId === model.id;
         const unchanged = sameJob && this.signature === signature;
         this.jobId = model.id;
+        this.latestModel = model;
         this.panel.title = panelTitle(model);
         if (!unchanged) {
             this.signature = signature;
@@ -100,6 +107,7 @@ export class JobResultPanel implements vscode.Disposable {
         this.signature = '';
         this.generation = 0;
         this.readyGeneration = 0;
+        this.latestModel = null;
     }
 
     private onMessage(message: unknown): void {
@@ -108,11 +116,23 @@ export class JobResultPanel implements vscode.Disposable {
         }
         const data = message as Record<string, unknown>;
         switch (data.command) {
-            case 'ready':
-                if (data.generation === this.generation) {
-                    this.readyGeneration = this.generation;
+            case 'ready': {
+                if (data.generation !== this.generation) {
+                    return;
+                }
+                // A recreated webview posts ready again with the same
+                // generation. The HTML it restored can still say "Loading
+                // input…", so send the job the page should be showing.
+                const restored = this.readyGeneration === this.generation;
+                this.readyGeneration = this.generation;
+                if (restored && this.latestModel && this.panel) {
+                    void this.panel.webview.postMessage({
+                        type: 'job',
+                        model: this.latestModel,
+                    });
                 }
                 return;
+            }
             case 'showJobs':
                 this.handlers.onShowJobs();
                 return;
