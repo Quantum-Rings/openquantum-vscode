@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createRequire } from 'node:module';
-import { parseString } from '@quantum-rings/openquantum-parser';
-import { QasmError } from '@quantum-rings/openquantum-parser/dist/errors';
+import { parseString } from '@openquantum-oss/oq-parse';
+import { QasmError } from '@openquantum-oss/oq-parse/dist/errors';
 import { tokenSpan, type RawToken } from './spans';
 import { statementDiagnostics } from './syntax';
 
@@ -313,7 +313,7 @@ function loadLexer(
 ): new (input: string, cursor?: number) => QasmLexer {
     const id = version === 2 ? 'qasm2' : 'qasm3';
     const loaded = nodeRequire(
-        `@quantum-rings/openquantum-parser/dist/${id}/lexer`,
+        `@openquantum-oss/oq-parse/dist/${id}/lexer`,
     ) as {
         default?: new (input: string, cursor?: number) => QasmLexer;
     };
@@ -326,7 +326,7 @@ function loadLexer(
 function loadTokenEnum(version: 2 | 3): Record<number, string> {
     const id = version === 2 ? 'qasm2' : 'qasm3';
     const loaded = nodeRequire(
-        `@quantum-rings/openquantum-parser/dist/${id}/token`,
+        `@openquantum-oss/oq-parse/dist/${id}/token`,
     ) as {
         Token: Record<number, string>;
     };

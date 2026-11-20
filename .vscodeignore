@@ -12,6 +12,6 @@ tsconfig.json
 .gitignore
 .npmrc
 node_modules/**
-!node_modules/@quantum-rings/
-!node_modules/@quantum-rings/openquantum-parser/
-!node_modules/@quantum-rings/openquantum-parser/**
+!node_modules/@openquantum-oss/
+!node_modules/@openquantum-oss/oq-parse/
+!node_modules/@openquantum-oss/oq-parse/**
